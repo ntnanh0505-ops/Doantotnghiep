@@ -1,0 +1,11 @@
+# Cấu hình bộ dữ liệu huấn luyện YOLOv8 Instance Segmentation
+# Đồ án: Đo kích thước bàn chân và tư vấn size giày
+path: C:/Users/LENOVO/Documents/Doantotnghiep/data/yolo_dataset
+train: images/train
+val: images/valid
+test: images/test
+
+# Danh sách lớp đối tượng (2 lớp)
+names:
+  0: foot
+  1: card
