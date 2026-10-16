@@ -1,0 +1,3 @@
+# Thư mục lưu model weights
+# pretrained/ — chứa yolov8n-seg.pt tải từ Ultralytics
+# trained/    — chứa weights sau khi training (runs/segment/...)

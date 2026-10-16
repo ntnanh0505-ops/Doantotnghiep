@@ -1,0 +1,16 @@
+# Cấu hình bộ dữ liệu huấn luyện YOLOv8 Instance Segmentation
+# Đồ án: Đo kích thước bàn chân và tư vấn size giày
+#
+# QUAN TRỌNG: Ultralytics resolve path tương đối từ vị trí file data.yaml này.
+# Để dùng từ thư mục gốc dự án, chạy: python main.py --stage yolo --action train
+# hoặc đặt path tuyệt đối nếu cần: path: /absolute/path/to/data/yolo_dataset
+path: .                       # Thư mục gốc = thư mục chứa file data.yaml này
+train: images/train
+val: images/valid
+test: images/test
+
+# Danh sách lớp đối tượng (2 lớp)
+nc: 2
+names:
+  0: foot
+  1: card
