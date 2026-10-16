@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# Data (kích thước lớn — dùng DVC hoặc lưu riêng)
+data/raw/
+data/processed/
+data/yolo_dataset/images/
+data/yolo_dataset/labels/
+
+# Model weights
+models/pretrained/*.pt
+models/trained/
+
+# Outputs (tạo lại được)
+outputs/
+
+# YOLO runs
+runs/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
