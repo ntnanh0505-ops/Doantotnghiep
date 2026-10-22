@@ -1,0 +1,6 @@
+# Thư mục scripts/ — Script tiện ích độc lập
+
+# train_yolo.py     — Shortcut training YOLO (wrapper của src/yolo_y8/train.py)
+# eval_opencv.py    — Đánh giá batch OpenCV và in báo cáo
+# compare_phases.py — So sánh kết quả 2 giai đoạn (OpenCV vs YOLO)
+# prepare_dataset.py— Chuẩn bị / chuyển đổi dataset (COCO → YOLO, resize,...)

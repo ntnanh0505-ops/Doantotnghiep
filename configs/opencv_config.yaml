@@ -1,0 +1,42 @@
+# Cấu hình OpenCV Pipeline — Giai đoạn 1
+# Đồ án: Đo kích thước bàn chân bằng thẻ ID-1 tham chiếu
+
+# ── Chuẩn thẻ ISO/IEC 7810 ID-1 ─────────────────────────────────────────────
+card:
+  long_mm: 85.60          # Chiều dài chuẩn thẻ ID-1
+  short_mm: 53.98         # Chiều rộng chuẩn thẻ ID-1
+  aspect_ratio: 1.58577   # = long_mm / short_mm
+
+# ── Giới hạn kích thước ảnh ─────────────────────────────────────────────────
+image:
+  max_dim: 2500           # Giới hạn chiều dài tối đa ảnh nắn (px) để tránh tràn RAM
+
+# ── Phát hiện thẻ (card_detector) ───────────────────────────────────────────
+detection:
+  aspect_ratio_min: 1.35  # Tỷ lệ cạnh tối thiểu chấp nhận (góc chụp nghiêng)
+  aspect_ratio_max: 1.80  # Tỷ lệ cạnh tối đa chấp nhận
+  min_solidity: 0.60      # Độ lồi tối thiểu của ứng viên
+  blue_hue_min: 85        # Dải màu xanh thẻ CCCD: H min (HSV)
+  blue_hue_max: 135       # Dải màu xanh thẻ CCCD: H max (HSV)
+  roi_scale: 2.5          # Hệ số mở rộng ROI quanh vùng xanh
+
+# ── Phân đoạn bàn chân (foot_segmenter) ─────────────────────────────────────
+segmentation:
+  ycrcb_cr_min: 132       # Cr channel min (phát hiện da)
+  ycrcb_cr_max: 178
+  ycrcb_cb_min: 80        # Cb channel min
+  ycrcb_cb_max: 135
+  min_aspect: 1.10        # Tỷ lệ chiều dài/chiều rộng tối thiểu của bàn chân
+  max_aspect: 4.50        # Tỷ lệ tối đa
+  heel_cut_max_mm: 275.0  # Chiều dài tối đa bàn chân người (mm) — kích hoạt cắt gót
+
+# ── Đo kích thước (foot_measurer) ───────────────────────────────────────────
+measurement:
+  ball_zone_start: 0.58   # Vị trí bắt đầu đo chiều rộng (% từ gót)
+  ball_zone_end: 0.85     # Vị trí kết thúc đo chiều rộng
+
+# ── Đường dẫn dữ liệu ───────────────────────────────────────────────────────
+paths:
+  dataset_raw: data/raw/foot_photos   # Ảnh gốc chụp từ điện thoại
+  dataset: data/processed             # Dữ liệu đã xử lý, phân chia (train/valid/test)
+  output: outputs/opencv              # Thư mục kết quả OpenCV

@@ -1,0 +1,62 @@
+# Cấu hình huấn luyện YOLOv8n-seg — Giai đoạn 2
+# Đồ án: Đo kích thước bàn chân và tư vấn size giày
+
+# ── Dataset ──────────────────────────────────────────────────────────────────
+# Sử dụng đường dẫn tương đối từ thư mục gốc dự án
+path: data/yolo_dataset
+train: images/train
+val:   images/valid
+test:  images/test
+
+# ── Classes ──────────────────────────────────────────────────────────────────
+nc: 2
+names:
+  0: foot
+  1: card
+
+# ── Hyperparameters ──────────────────────────────────────────────────────────
+# Model
+model: models/pretrained/yolov8n-seg.pt
+
+# Training
+epochs: 100
+patience: 30          # Early stopping patience
+batch: 16             # -1 để auto
+imgsz: 640
+optimizer: AdamW
+lr0: 0.01             # Learning rate khởi đầu
+lrf: 0.01             # Final OneCycleLR lr = lr0 * lrf
+momentum: 0.937
+weight_decay: 0.0005
+warmup_epochs: 3.0
+warmup_momentum: 0.8
+warmup_bias_lr: 0.1
+
+# Loss weights
+box: 7.5
+cls: 0.5
+dfl: 1.5
+
+# Data Augmentation
+hsv_h: 0.015          # HSV Hue augmentation
+hsv_s: 0.7            # HSV Saturation augmentation
+hsv_v: 0.4            # HSV Value augmentation
+degrees: 10.0         # Rotation (+/- degrees)
+translate: 0.1        # Translation (+/- fraction)
+scale: 0.5            # Scale (+/- gain)
+shear: 2.0            # Shear (+/- degrees)
+perspective: 0.0      # Perspective (+/- fraction)
+flipud: 0.2           # Flip up-down probability
+fliplr: 0.5           # Flip left-right probability
+mosaic: 1.0           # Mosaic augmentation
+mixup: 0.0            # Mixup augmentation
+copy_paste: 0.0       # Copy-paste augmentation (tốt cho segmentation)
+
+# Output
+project: models/trained
+name: yolov8n_seg_foot
+save: true
+save_period: 10       # Lưu checkpoint mỗi N epoch
+plots: true
+val: true
+verbose: true
