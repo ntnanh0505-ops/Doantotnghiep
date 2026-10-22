@@ -9,31 +9,40 @@ dist/
 build/
 .eggs/
 
-# Virtual environments
+# Virtual environments / secrets
 venv/
 .venv/
 env/
+.env
 .env/
 
-# Data (kích thước lớn — dùng DVC hoặc lưu riêng)
-data/raw/
-data/processed/
-data/yolo_dataset/images/
-data/yolo_dataset/labels/
+# Data (kích thước lớn — lưu trên Drive/Roboflow, không đưa lên git)
+data/*
+!data/yolo_dataset/
+data/yolo_dataset/*
+!data/yolo_dataset/data.yaml
 
-# Model weights
-models/pretrained/*.pt
+# Model weights (tải lại được)
+*.pt
+*.pth
+*.onnx
 models/trained/
 
 # Outputs (tạo lại được)
 outputs/
-
-# YOLO runs
 runs/
+scratch/
 
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
+
+# Công cụ AI / BMAD (mỗi máy tự cài)
+.agent/
+.agents/
+.claude/
+_bmad/
+_bmad-output/
 
 # IDE
 .vscode/
