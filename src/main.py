@@ -1,6 +1,6 @@
 """
-Entry Point chuongtrinhchay/main.py:
-Cho phép chạy trực tiếp từ gói chuongtrinhchay hoặc thư mục gốc.
+Entry Point src/main.py:
+Cho phép chạy trực tiếp từ gói src hoặc thư mục gốc.
 """
 import sys
 from pathlib import Path
@@ -18,7 +18,7 @@ project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from chuongtrinhchay.doan import (
+from src.doan import (
     CARD_LONG_MM,
     CARD_SHORT_MM,
     CARD_ASPECT_RATIO,
