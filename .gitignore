@@ -23,7 +23,6 @@ data/yolo_dataset/*
 !data/yolo_dataset/data.yaml
 
 # Model weights (tải lại được)
-*.pt
 *.pth
 *.onnx
 models/trained/
