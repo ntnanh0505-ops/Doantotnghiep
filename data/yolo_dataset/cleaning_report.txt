@@ -1,0 +1,70 @@
+Ảnh đọc từ COCO: 391
+  LOẠI P024_R_01 (train): thiếu ['fthe_id']
+  LOẠI P001_R_02 (train): thiếu ['fthe_id']
+  LOẠI P014_L_03 (test): thiếu ['Foot-fit'], annotation lỗi ['Foot-fit area=5.1']
+  LOẠI P012_R_01 (test): thiếu ['fthe_id'], annotation lỗi ['fthe_id area=0.6']
+Giữ 387 ảnh, loại 4
+Ảnh gốc: 339
+  LOẠI P041_R_05: không có ảnh gốc
+  LOẠI P042_L_04: không có ảnh gốc
+  LOẠI P042_L_01: không có ảnh gốc
+  LOẠI P040_R_02: không có ảnh gốc
+  LOẠI P040_L_01: không có ảnh gốc
+  LOẠI P044_R_04: không có ảnh gốc
+  LOẠI P041_L_04: không có ảnh gốc
+  LOẠI P041_L_05: không có ảnh gốc
+  LOẠI P043_R_03: không có ảnh gốc
+  LOẠI P044_L_03: không có ảnh gốc
+  LOẠI P040_L_03: không có ảnh gốc
+  LOẠI P044_R_06: không có ảnh gốc
+  LOẠI P042_L_02: không có ảnh gốc
+  LOẠI P043_R_04: không có ảnh gốc
+  LOẠI P042_R_03: không có ảnh gốc
+  LOẠI P041_L_02: không có ảnh gốc
+  LOẠI P042_R_04: không có ảnh gốc
+  LOẠI P041_R_06: không có ảnh gốc
+  LOẠI P041_L_01: không có ảnh gốc
+  LOẠI P041_R_01: không có ảnh gốc
+  LOẠI P040_R_04: không có ảnh gốc
+  LOẠI P040_R_01: không có ảnh gốc
+  LOẠI P043_R_21: không có ảnh gốc
+  LOẠI P041_R_04: không có ảnh gốc
+  LOẠI P043_L_04: không có ảnh gốc
+  LOẠI P043_L_01: không có ảnh gốc
+  LOẠI P043_L_05: không có ảnh gốc
+  LOẠI P044_L_04: không có ảnh gốc
+  LOẠI P043_L_02: không có ảnh gốc
+  LOẠI P043_R_02: không có ảnh gốc
+  LOẠI P041_L_03: không có ảnh gốc
+  LOẠI P040_L_04: không có ảnh gốc
+  LOẠI P042_R_01: không có ảnh gốc
+  LOẠI P044_R_05: không có ảnh gốc
+  LOẠI P044_R_01: không có ảnh gốc
+  LOẠI P040_L_02: không có ảnh gốc
+  LOẠI P041_R_02: không có ảnh gốc
+  LOẠI P040_R_05: không có ảnh gốc
+  LOẠI P040_R_06: không có ảnh gốc
+  LOẠI P044_R_03: không có ảnh gốc
+  LOẠI P044_R_02: không có ảnh gốc
+  LOẠI P042_L_03: không có ảnh gốc
+  LOẠI P044_L_06: không có ảnh gốc
+  LOẠI P043_R_05: không có ảnh gốc
+  LOẠI P043_L_03: không có ảnh gốc
+  LOẠI P044_L_02: không có ảnh gốc
+  LOẠI P042_R_05: không có ảnh gốc
+  LOẠI P044_L_01: không có ảnh gốc
+  LOẠI P040_R_03: không có ảnh gốc
+  LOẠI P041_R_03: không có ảnh gốc
+  LOẠI P042_L_05: không có ảnh gốc
+  LOẠI P044_L_05: không có ảnh gốc
+  LOẠI P042_R_02: không có ảnh gốc
+Còn 334 ảnh có ảnh gốc, ảnh gốc không dùng được vì chưa có nhãn hợp lệ: [('P001', 'R', 2), ('P012', 'R', 1), ('P014', 'L', 3), ('P024', 'R', 1), ('P033', 'L', 3)]
+Tên trùng sau chuẩn hóa: không
+Metadata khớp ảnh: 334/334; CSV không có ảnh: [('P001', 'R', 2), ('P012', 'R', 1), ('P014', 'L', 3), ('P024', 'R', 1), ('P033', 'L', 3), ('P040', 'L', 1), ('P040', 'L', 2), ('P040', 'L', 3), ('P040', 'L', 4), ('P040', 'R', 1), ('P040', 'R', 2), ('P040', 'R', 3), ('P040', 'R', 4), ('P040', 'R', 5), ('P040', 'R', 6), ('P041', 'L', 1), ('P041', 'L', 2), ('P041', 'L', 3), ('P041', 'L', 4), ('P041', 'L', 5), ('P041', 'R', 1), ('P041', 'R', 2), ('P041', 'R', 3), ('P041', 'R', 4), ('P041', 'R', 5), ('P041', 'R', 6), ('P042', 'L', 1), ('P042', 'L', 2), ('P042', 'L', 3), ('P042', 'L', 4), ('P042', 'L', 5), ('P042', 'R', 1), ('P042', 'R', 2), ('P042', 'R', 3), ('P042', 'R', 4), ('P042', 'R', 5), ('P043', 'L', 1), ('P043', 'L', 2), ('P043', 'L', 3), ('P043', 'L', 4), ('P043', 'L', 5), ('P043', 'R', 2), ('P043', 'R', 3), ('P043', 'R', 4), ('P043', 'R', 5), ('P043', 'R', 21), ('P044', 'L', 1), ('P044', 'L', 2), ('P044', 'L', 3), ('P044', 'L', 4), ('P044', 'L', 5), ('P044', 'L', 6), ('P044', 'R', 1), ('P044', 'R', 2), ('P044', 'R', 3), ('P044', 'R', 4), ('P044', 'R', 5), ('P044', 'R', 6)]; ảnh không có CSV: []
+Chia theo người (cost chi-bình-phương=10.4):
+  train: 232 ảnh, 25 người | gach=212, gach_hoanhi=20, L=121, R=111, nghieng=39, thang=148, tren_xuong=45
+  valid: 49 ảnh, 7 người | gach=49, L=22, R=27, nghieng=8, thang=29, tren_xuong=12
+  test: 53 ảnh, 7 người | gach=45, gach_hoanhi=8, L=27, R=26, nghieng=10, thang=34, tren_xuong=9
+Người trùng giữa các tập: không
+subjects: 90 dòng, 44 người; (id,chân) trùng: [('P034', 'L'), ('P034', 'R')]
+Người có ảnh nhưng không có số đo: []; có số đo nhưng không có ảnh: ['P040', 'P041', 'P042', 'P043', 'P044']

@@ -3,16 +3,13 @@ predict.py — Inference với YOLOv8n-seg model đã train (Giai đoạn 2).
 
 Sử dụng:
     python -m src.yolo_y8.predict --weights models/trained/yolov8n_seg_foot/weights/best.pt
-                                  --source data/raw/foot_photos/
+                                  --source data/yolo_dataset/images/test
                                   --output outputs/yolo_y8/predictions/
 """
 
 import argparse
-from pathlib import Path
 
-
-def get_project_root() -> Path:
-    return Path(__file__).resolve().parent.parent.parent
+from .train import get_project_root, resolve_device
 
 
 def predict(
@@ -22,7 +19,7 @@ def predict(
     conf: float = 0.25,
     iou: float = 0.45,
     imgsz: int = 640,
-    device: str = "0",
+    device: str = None,
     save_txt: bool = True,
     save_conf: bool = True,
 ):
@@ -36,7 +33,7 @@ def predict(
         conf      : Ngưỡng confidence
         iou       : Ngưỡng IoU cho NMS
         imgsz     : Kích thước ảnh inference
-        device    : Thiết bị
+        device    : Thiết bị (mặc định tự chọn CUDA > MPS > CPU)
         save_txt  : Lưu labels dạng txt
         save_conf : Lưu confidence score trong txt
     """
@@ -46,6 +43,7 @@ def predict(
         raise ImportError("Ultralytics chưa được cài đặt. Chạy: pip install ultralytics")
 
     root = get_project_root()
+    device = resolve_device(device)
     if output_dir is None:
         output_dir = str(root / "outputs" / "yolo_y8" / "predictions")
 
@@ -70,13 +68,13 @@ def predict(
         save_conf=save_conf,
         project=output_dir,
         name="run",
+        exist_ok=True,
         stream=False,
     )
     return results
 
 
 def main():
-    root = get_project_root()
     parser = argparse.ArgumentParser(description="Inference YOLOv8n-seg phân đoạn bàn chân và thẻ ID")
     parser.add_argument("--weights", type=str, required=True, help="Đường dẫn file weights (.pt)")
     parser.add_argument("--source", type=str, required=True, help="Ảnh, thư mục hoặc glob pattern")
@@ -84,7 +82,7 @@ def main():
     parser.add_argument("--conf", type=float, default=0.25, help="Ngưỡng confidence (mặc định: 0.25)")
     parser.add_argument("--iou", type=float, default=0.45, help="Ngưỡng IoU NMS (mặc định: 0.45)")
     parser.add_argument("--imgsz", type=int, default=640, help="Kích thước ảnh (mặc định: 640)")
-    parser.add_argument("--device", type=str, default="0", help="Thiết bị: '0' hoặc 'cpu'")
+    parser.add_argument("--device", type=str, default=None, help="Thiết bị: '0', 'mps', 'cpu'; mặc định tự chọn")
     args = parser.parse_args()
 
     predict(

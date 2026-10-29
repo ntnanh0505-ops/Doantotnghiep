@@ -16,12 +16,6 @@ env/
 .env
 .env/
 
-# Data (kích thước lớn — lưu trên Drive/Roboflow, không đưa lên git)
-data/*
-!data/yolo_dataset/
-data/yolo_dataset/*
-!data/yolo_dataset/data.yaml
-
 # Model weights (tải lại được)
 *.pth
 *.onnx

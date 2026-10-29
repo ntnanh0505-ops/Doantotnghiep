@@ -52,13 +52,13 @@ def load_dataset(split: str = "test", dataset_dir: Path = None):
     """
     Hàm load_dataset(split='test'):
     - Tự động duyệt và quét toàn bộ file ảnh .jpg, .jpeg, .png từ thư mục split.
-    - Mặc định tìm tại data/bodulieu/{split}.
+    - Mặc định tìm tại data/yolo_dataset/images/{split}.
     """
     if dataset_dir is None:
         root = get_project_root()
         candidate_paths = [
-            root / "data" / "bodulieu" / split,
-            Path("data/bodulieu") / split,
+            root / "data" / "yolo_dataset" / "images" / split,
+            Path("data/yolo_dataset/images") / split,
             Path("data") / split,
             Path(split)
         ]
@@ -68,7 +68,7 @@ def load_dataset(split: str = "test", dataset_dir: Path = None):
                 target_dir = cp.resolve()
                 break
         if target_dir is None:
-            target_dir = (root / "data" / "bodulieu" / split).resolve()
+            target_dir = (root / "data" / "yolo_dataset" / "images" / split).resolve()
     else:
         target_dir = Path(dataset_dir) / split if (Path(dataset_dir) / split).exists() else Path(dataset_dir)
 
@@ -1211,7 +1211,7 @@ def main():
             cv2.destroyAllWindows()
     else:
         # Trường hợp 2: Chạy tập dữ liệu (mặc định 'test')
-        data_dir = Path(args.data).resolve() if args.data else (project_root / "data" / "bodulieu")
+        data_dir = Path(args.data).resolve() if args.data else (project_root / "data" / "yolo_dataset" / "images")
         splits_to_run = ["train", "valid", "test"] if args.split == "all" else [args.split]
         for sp in splits_to_run:
             run_dataset_loop(split=sp, dataset_dir=data_dir, output_dir=out_dir,

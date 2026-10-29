@@ -12,7 +12,7 @@ src/doan.py             Pipeline chính (bản DUY NHẤT, sửa trực tiếp �
 src/opencv/             Module OpenCV: card_detector, perspective, foot_segmenter, foot_measurer, pipeline
 src/yolo_y8/            train.py, predict.py, evaluate.py
 configs/                opencv_config.yaml, yolo_config.yaml
-data/yolo_dataset/data.yaml   (chỉ file này, ảnh/nhãn KHÔNG commit)
+data/yolo_dataset/      Bộ train sạch (images/, labels/, data.yaml, CSV). Chỉ thư mục này được commit
 docs/                   Đề cương, tài liệu báo cáo
 scripts/                Script tiện ích lâu dài (không phải script thử nghiệm)
 requirements.txt
@@ -32,7 +32,8 @@ Muốn thêm thư mục cấp gốc mới thì phải hỏi người dùng trư�
 
 ## 3. Dữ liệu, model, đường dẫn
 
-- `data/` (ảnh gốc, `bodulieu`, `yolo_dataset/images|labels`) **không đưa lên git**. Dataset chia sẻ qua Drive/Roboflow.
+- `data/yolo_dataset/` (bộ train sạch, ~70MB) **được commit** để chuyển sang máy train. Mọi thứ khác trong `data/` (`raw_images/`, `roboflow_export/`, bản backup…) **không đưa lên git**, chia sẻ qua Drive/Roboflow. Không commit `labels/*.cache`.
+- Không tự thay đổi `data/yolo_dataset/` (thêm/xóa/đổi tên ảnh) nếu người dùng không yêu cầu, vì mỗi lần commit lại ảnh sẽ làm `.git` phình thêm.
 - Weights (`*.pt`, `*.pth`, `*.onnx`), `runs/`, `models/trained/` **không commit**. Những thứ này tải lại hoặc train lại được.
 - **Chỉ dùng đường dẫn tương đối** tính từ gốc dự án (`get_project_root()` / `Path(__file__)`). Không ghi cứng `C:/Users/...` vào code hay file yaml rồi commit.
 - Tham số (ngưỡng, kích thước thẻ…) đặt trong `configs/*.yaml`, không ghi cứng rải rác trong code.
@@ -57,11 +58,11 @@ git diff --stat
 
 - Chỉ `git add <file cụ thể>`. **Không `git add .` hoặc `git add -A`** khi chưa đọc `git status`.
 - **Không bao giờ dùng `git add -f` / `--force`**. File bị ignore là có lý do.
-- Nếu `git status` hiện ảnh, `.pyc`, `__pycache__`, `outputs/`, `data/`, `.pt` hay thư mục AI thì **dừng lại, không commit**, và báo người dùng.
+- Nếu `git status` hiện ảnh, `.pyc`, `__pycache__`, `outputs/`, `data/` (ngoài `data/yolo_dataset/`), `.pt` hay thư mục AI thì **dừng lại, không commit**, và báo người dùng.
 - Mỗi commit chỉ làm một việc, kèm message mô tả rõ, ví dụ `Sửa phát hiện thẻ khi ảnh bị lóa`. Không dùng message kiểu `k`, `update`, `fix`.
 - **Không `git push --force`, không viết lại lịch sử, không xóa nhánh** nếu người dùng không yêu cầu rõ ràng.
 - Khi pull bị conflict thì giải quyết conflict. Không xóa file của người khác để cho qua.
-- Mỗi commit phải nhỏ (vài trăm KB). Nếu diff có file > 1MB thì kiểm tra lại.
+- Mỗi commit phải nhỏ (vài trăm KB). Nếu diff có file > 1MB thì kiểm tra lại. Ngoại lệ: commit đưa `data/yolo_dataset/` lên, và commit đó chỉ chứa thư mục này.
 
 ## 6. Chạy chương trình
 
@@ -69,7 +70,7 @@ git diff --stat
 pip install -r requirements.txt
 
 python main.py --image <đường_dẫn_ảnh>          # 1 ảnh
-python main.py --split test --no-gui            # chạy cả tập test (data/bodulieu)
+python main.py --split test --no-gui            # chạy cả tập test (data/yolo_dataset/images/test)
 python -m src.yolo_y8.train --data configs/yolo_config.yaml
 python -m src.yolo_y8.predict --weights models/trained/.../best.pt --source <ảnh|thư mục>
 ```
