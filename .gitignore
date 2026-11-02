@@ -16,10 +16,21 @@ env/
 .env
 .env/
 
-# Model weights (tải lại được)
+# Mô hình: chỉ commit mô hình dùng để chạy (nhỏ, ~7 MB) để máy không có GPU pull về dùng được ngay.
+# Bỏ checkpoint trung gian (epoch*.pt, last.pt ~34 MB/cái), các lần train cũ và file sinh ra khi train.
 *.pth
 *.onnx
-models/trained/
+models/trained/*
+!models/trained/length_model.json
+!models/trained/yolov8n_seg_foot/
+models/trained/yolov8n_seg_foot/*
+!models/trained/yolov8n_seg_foot/weights/
+models/trained/yolov8n_seg_foot/weights/*
+!models/trained/yolov8n_seg_foot/weights/best.pt
+
+# Ultralytics tự tải weights kiểm tra AMP vào thư mục chạy, và cache nhãn (tự sinh lại)
+/weights/
+*.cache
 
 # Outputs (tạo lại được)
 outputs/

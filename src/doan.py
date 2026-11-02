@@ -17,10 +17,15 @@ import sys
 import glob
 import time
 import csv
+import json
 import argparse
+from contextlib import redirect_stdout
 from pathlib import Path
 import cv2
 import numpy as np
+
+from src.yolo_y8.predict import detect_foot_card, load_detector
+from src.yolo_y8.train import load_config
 
 # Cấu hình UTF-8 cho console Windows
 if sys.platform.startswith("win"):
@@ -34,10 +39,20 @@ if sys.platform.startswith("win"):
 # HẰNG SỐ CHUẨN QUỐC TẾ (ISO/IEC 7810 ID-1)
 # ==============================================================================
 CARD_LONG_MM = 85.60     # Chiều dài chuẩn thẻ ID-1 (CCCD / thẻ ngân hàng / thẻ SV)
-CARD_SHORT_MM = 54.00    # Chiều rộng chuẩn thẻ ID-1
+CARD_SHORT_MM = 53.98    # Chiều rộng chuẩn thẻ ID-1
 CARD_ASPECT_RATIO = CARD_LONG_MM / CARD_SHORT_MM  # ~ 1.585185...
 HOMOGRAPHY_SCALE_PX_PER_MM = 10.0  # S = 10 px/mm (1 mm = 0.1 px)
 MAX_IMAGE_DIM = 2600     # Giới hạn kích thước tối đa tránh tràn bộ nhớ khi warp
+LENGTH_FEATURES = ["L_raw", "W_raw", "rear", "area", "perim", "hull", "solidity", "rect_L", "rect_W",
+                   "card_frac", "D", "L_over_D", "W_over_D"]  # thứ tự đặc trưng của mô hình chiều dài (xem length_features)
+TOE_NOTCH_MIN_MM = 1.0   # Kẽ giữa các ngón chân (khuyết lồi của viền) sâu từ mức này mới tính khi tìm đầu ngón
+CHORD_STRIP_MM = 1.5     # Bề rộng dải khi tìm dây cung dài/rộng nhất của mặt nạ
+BALL_FROM_TOE_MM = (45.0, 95.0)  # Chiều rộng đo trong cửa sổ cách đầu ngón này (mm): vùng khớp ngón, không phụ thuộc thấy gót hay không
+SPIKE_OPEN_MM = 10.0     # Kích thước phép mở hình thái học loại đuôi mỏng khỏi mặt nạ YOLO (ngón chân rộng hơn thế nhiều)
+HEEL_REAR_SOLIDITY_MIN = 0.91  # Thấy gót khi 25% đầu sau của mặt nạ đủ lồi (diện tích / diện tích bao lồi) ...
+HEEL_REAR_NOTCH_MAX_MM = 25.0  # ... và ở đầu sau không có chỗ lõm sâu hơn mức này (mép ống quần / cẳng chân cắt vào).
+# Hai ngưỡng chọn trên 7 ảnh thấy gót / 46 ảnh che gót xem bằng mắt, thử qua 5 biến thể ảnh (JPEG 85/95, phóng 3 lần rồi thu nhỏ,
+# sáng +10%): 7/7 ảnh thấy gót luôn được nhận, nhầm 8-9/46. Ngưỡng lõm 15 mm trước đây làm ảnh thấy gót bị từ chối ngẫu nhiên khi lưu lại JPEG.
 
 
 def get_project_root() -> Path:
@@ -90,6 +105,23 @@ def load_dataset(split: str = "test", dataset_dir: Path = None):
 # ==============================================================================
 # KHỐI 2: KIỂM TRA CHẤT LƯỢNG ẢNH ĐẦU VÀO (IMAGE QUALITY ASSESSMENT)
 # ==============================================================================
+HEEL_HIDDEN_MESSAGE = ("Không thấy gót (gót bị cổ chân/ống quần che): từ chối đo. "
+                       "Chụp lại từ trên xuống sao cho thấy rõ gót và 5 ngón chân, cẳng chân nằm ngoài khung hình")
+
+
+def preprocess_image(image):
+    """
+    Thu nhỏ ảnh về tối đa input.max_long_side x input.max_short_side (mặc định Full HD, ~2 MP) trong configs/yolo_config.yaml.
+    Giữ tỉ lệ, không phóng to ảnh nhỏ hơn khung. Trả về (ảnh, hệ số thu nhỏ). Nội suy INTER_AREA để không làm mờ cạnh thẻ.
+    """
+    cfg = load_config().get("input", {})
+    h, w = image.shape[:2]
+    scale = min(1.0, cfg.get("max_long_side", 1920) / max(h, w), cfg.get("max_short_side", 1080) / min(h, w))
+    if scale >= 1.0:
+        return image, 1.0
+    return cv2.resize(image, (max(1, round(w * scale)), max(1, round(h * scale))), interpolation=cv2.INTER_AREA), scale
+
+
 def assess_image_quality(image, sharpness_thresh: float = 80.0,
                          min_brightness: float = 50.0, max_brightness: float = 215.0):
     """
@@ -364,6 +396,98 @@ def detect_card_corners(image, debug: bool = False, verbose: bool = False):
 detect_card = detect_card_corners
 
 
+def card_corners_from_polygon(poly):
+    """
+    Suy ra 4 góc thẻ (TL, TR, BR, BL; pixel ảnh gốc) từ polygon mask thẻ do YOLO phân đoạn.
+    - Xấp xỉ bao lồi về tứ giác, rồi khớp lại 4 đường cạnh từ các điểm biên và lấy giao điểm.
+    - Thẻ có góc bo tròn nên đỉnh của bao lồi nằm lệch vào trong; dùng thẳng các đỉnh đó sẽ làm
+      tỷ lệ px/mm sai, còn giao của 4 đường cạnh thì trả lại đúng góc hình học.
+    Trả về None nếu polygon không đủ điểm.
+    """
+    pts = np.asarray(poly, dtype=np.float32).reshape(-1, 2)
+    if len(pts) < 4:
+        return None
+
+    hull = cv2.convexHull(pts)
+    peri = cv2.arcLength(hull, True)
+    quad = None
+    for eps in np.linspace(0.01, 0.08, 15):
+        approx = cv2.approxPolyDP(hull, eps * peri, True).reshape(-1, 2)
+        if len(approx) == 4:
+            quad = approx
+            break
+        if len(approx) < 4:
+            break
+    if quad is None:
+        quad = cv2.boxPoints(cv2.minAreaRect(hull))
+    quad = order_points(quad)
+
+    # Khớp lại 4 cạnh bằng các điểm biên nằm ở phần giữa mỗi cạnh (tránh vùng góc bo)
+    edge_len = [float(np.linalg.norm(quad[(i + 1) % 4] - quad[i])) for i in range(4)]
+    tol = 0.04 * min(edge_len)
+    lines = []
+    for i in range(4):
+        a, b = quad[i], quad[(i + 1) % 4]
+        u = (b - a) / max(1e-5, edge_len[i])
+        n = np.array([-u[1], u[0]], dtype=np.float32)
+        rel = pts - a
+        t = (rel @ u) / max(1e-5, edge_len[i])
+        near = np.abs(rel @ n) <= tol
+        sel = pts[near & (t >= 0.2) & (t <= 0.8)]
+        if len(sel) < 8:
+            return quad
+        vx, vy, x0, y0 = cv2.fitLine(sel, cv2.DIST_HUBER, 0, 0.01, 0.01).ravel()
+        lines.append((np.array([x0, y0], dtype=np.float64), np.array([vx, vy], dtype=np.float64)))
+
+    refined = quad.copy()
+    for i in range(4):
+        # Góc i = giao của cạnh (i-1 -> i) và cạnh (i -> i+1)
+        (p1, d1), (p2, d2) = lines[(i - 1) % 4], lines[i]
+        A = np.column_stack((d1, -d2))
+        if abs(np.linalg.det(A)) < 1e-6:
+            return quad
+        s, _ = np.linalg.solve(A, p2 - p1)
+        corner = (p1 + s * d1).astype(np.float32)
+        if np.linalg.norm(corner - quad[i]) <= 0.06 * max(edge_len):
+            refined[i] = corner
+    return order_points(refined)
+
+
+def detect_card_yolo(image, detection):
+    """
+    Thay thế detect_card() bằng mask thẻ của YOLO (detection = predict.detect_foot_card()).
+    Trả về dict cùng khóa với detect_card() để pipeline dùng chung phần phía sau.
+    """
+    fail = {"success": False, "corners": None, "debug_image": image.copy(), "aspect_ratio": 0.0,
+            "area": 0.0, "card_long_px": 0.0, "card_short_px": 0.0, "error_message": ""}
+
+    corners = card_corners_from_polygon(detection.get("card_polygon")) if detection.get("card_polygon") is not None else None
+    if corners is None:
+        fail["error_message"] = "YOLO không phát hiện được thẻ ID-1"
+        return fail
+
+    tl, tr, br, bl = corners
+    w_avg = (np.linalg.norm(tr - tl) + np.linalg.norm(br - bl)) / 2.0
+    h_avg = (np.linalg.norm(bl - tl) + np.linalg.norm(br - tr)) / 2.0
+    long_px, short_px = max(w_avg, h_avg), min(w_avg, h_avg)
+    aspect = long_px / max(1e-5, short_px)
+    if not (1.25 <= aspect <= 1.95):
+        fail["error_message"] = f"Tỷ lệ cạnh thẻ YOLO bất thường ({aspect:.2f}, chuẩn ISO ~1.585)"
+        return fail
+
+    debug_img = image.copy()
+    pts_int = np.round(corners).astype(np.int32)
+    cv2.polylines(debug_img, [pts_int], True, (0, 255, 0), 2, cv2.LINE_AA)
+    for label, pt, color in zip(["TL", "TR", "BR", "BL"], pts_int,
+                                [(0, 0, 255), (0, 255, 255), (255, 0, 0), (255, 0, 255)]):
+        cv2.circle(debug_img, tuple(int(v) for v in pt), 6, color, -1, cv2.LINE_AA)
+        cv2.putText(debug_img, label, (int(pt[0]) + 8, int(pt[1]) + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
+
+    return {"success": True, "corners": corners, "debug_image": debug_img, "aspect_ratio": float(aspect),
+            "area": float(cv2.contourArea(corners)), "card_long_px": float(long_px),
+            "card_short_px": float(short_px), "error_message": ""}
+
+
 # ==============================================================================
 # KHỐI 4: HIỆU CHỈNH PHỐI CẢNH (PERSPECTIVE TRANSFORM) & SO SÁNH TỶ LỆ
 # ==============================================================================
@@ -534,6 +658,121 @@ def rectify_perspective(image, card_corners, target_px_per_mm: float = HOMOGRAPH
     }
 
 
+def toe_direction_sign(contour, centroid, u, mm_per_pixel: float):
+    """
+    Đầu ngón nằm ở phía nào của trục u: +1 (phía u dương), -1 (phía âm), None nếu không phân biệt được.
+    Đầu ngón chân có nhiều kẽ giữa các ngón (khuyết lồi của viền) hơn đầu gót / cổ chân. Cách cũ coi đầu rộng hơn là
+    ngón, nhưng khi mặt nạ lẫn cổ chân thì đầu cổ chân rộng hơn nên bị đảo ngược (sai ~40% ảnh khi kiểm tra bằng mắt).
+    """
+    pts = contour.reshape(-1, 2).astype(np.float64)
+    a = (pts - centroid) @ u
+    band = 0.30 * (a.max() - a.min())
+    try:
+        defects = cv2.convexityDefects(contour, cv2.convexHull(contour, returnPoints=False))
+    except cv2.error:
+        return None
+    if defects is None:
+        return None
+    low = high = 0
+    for _, _, far, depth in defects.reshape(-1, 4):
+        if depth / 256.0 * mm_per_pixel < TOE_NOTCH_MIN_MM:
+            continue
+        if a[far] <= a.min() + band:
+            low += 1
+        elif a[far] >= a.max() - band:
+            high += 1
+    return None if low == high else (1 if high > low else -1)
+
+
+def cut_ankle(foot_mask, best_cnt, card_polygon):
+    """
+    Cắt eo cổ chân (Ankle Cut-off) khi bàn chân kéo dài chạm viền ảnh hoặc dài bất thường,
+    tránh đo cả bắp chân. Dùng chung cho mặt nạ OpenCV và mặt nạ YOLO.
+    Trả về (foot_mask, best_cnt) sau khi cắt.
+    """
+    h, w = foot_mask.shape[:2]
+    # 6. Cắt eo cổ chân (Ankle Cut-off) tránh đo bắp chân khi chụp đứng
+    y_idx, x_idx = np.where(foot_mask > 0)
+    if len(x_idx) > 200:
+        pts_xy = np.column_stack((x_idx, y_idx)).astype(np.float64)
+        centroid = np.mean(pts_xy, axis=0)
+        pts_centered = pts_xy - centroid
+        cov = np.cov(pts_centered, rowvar=False)
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+        sort_idx = np.argsort(eigenvalues)[::-1]
+        v_major = eigenvectors[:, sort_idx[0]]
+        v_minor = eigenvectors[:, sort_idx[1]]
+
+        proj_major = pts_centered @ v_major
+        p_min = float(np.min(proj_major))
+        p_max = float(np.max(proj_major))
+
+        # Phân biệt đầu ngón chân (bè rộng hơn) và gót chân/cổ chân
+        pts_min_end = pts_xy[proj_major <= p_min + 0.15 * (p_max - p_min)]
+        pts_max_end = pts_xy[proj_major >= p_max - 0.15 * (p_max - p_min)]
+        min_touches_top = np.any(pts_min_end[:, 1] <= 15)
+
+        w_min_slice, w_max_slice = [], []
+        for t in np.linspace(p_min + 0.15 * (p_max - p_min), p_min + 0.35 * (p_max - p_min), 8):
+            m = (proj_major >= t - 3) & (proj_major <= t + 3)
+            if np.any(m):
+                q = pts_centered[m] @ v_minor
+                w_min_slice.append(np.ptp(q))
+        for t in np.linspace(p_max - 0.35 * (p_max - p_min), p_max - 0.15 * (p_max - p_min), 8):
+            m = (proj_major >= t - 3) & (proj_major <= t + 3)
+            if np.any(m):
+                q = pts_centered[m] @ v_minor
+                w_max_slice.append(np.ptp(q))
+
+        avg_w_min = np.mean(w_min_slice) if w_min_slice else 0
+        avg_w_max = np.mean(w_max_slice) if w_max_slice else 0
+
+        # Chuẩn hóa sao cho p_max là Ngón chân, p_min là Gót chân
+        c_edge1 = np.linalg.norm(card_polygon[1] - card_polygon[0])
+        c_edge2 = np.linalg.norm(card_polygon[3] - card_polygon[0])
+        mm_px_local = CARD_LONG_MM / max(1.0, max(c_edge1, c_edge2))
+        toe_sign = toe_direction_sign(best_cnt, centroid, v_major, mm_px_local)
+        if toe_sign is None:
+            toe_sign = 1 if (min_touches_top or (avg_w_max > avg_w_min)) else -1
+        if toe_sign < 0:
+            v_major = -v_major
+            v_minor = -v_minor
+            proj_major = pts_centered @ v_major
+            p_min = float(np.min(proj_major))
+            p_max = float(np.max(proj_major))
+
+        span_mm = (p_max - p_min) * mm_px_local
+
+        if min_touches_top or span_mm > 275.0:
+            dist_heel_max_px = 290.0 / mm_px_local
+            dist_heel_min_px = 210.0 / mm_px_local
+            t_search_start = max(p_min, p_max - dist_heel_max_px)
+            t_search_end = min(p_max - 120.0 / mm_px_local, p_max - dist_heel_min_px)
+
+            best_t_cut = p_min
+            min_w_scan = 999999.0
+            scan_step = max(2.0, (t_search_end - t_search_start) / 30.0)
+
+            for t_scan in np.arange(t_search_start, t_search_end, scan_step):
+                m = (proj_major >= t_scan - 4.0) & (proj_major <= t_scan + 4.0)
+                if np.any(m):
+                    q = pts_centered[m] @ v_minor
+                    w_curr = np.ptp(q)
+                    if w_curr < min_w_scan:
+                        min_w_scan = w_curr
+                        best_t_cut = t_scan
+
+            if best_t_cut > p_min:
+                cut_cond = (proj_major < best_t_cut)
+                foot_mask[pts_xy[cut_cond, 1].astype(int), pts_xy[cut_cond, 0].astype(int)] = 0
+                cnts_refined, _ = cv2.findContours(foot_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if cnts_refined:
+                    best_cnt = max(cnts_refined, key=cv2.contourArea)
+                    foot_mask = np.zeros((h, w), dtype=np.uint8)
+                    cv2.drawContours(foot_mask, [best_cnt], -1, 255, -1)
+    return foot_mask, best_cnt
+
+
 # ==============================================================================
 # KHỐI 5: TÁCH MẶT NẠ BÀN CHÂN (SKIN COLOR + OTSU)
 # ==============================================================================
@@ -631,87 +870,47 @@ def segment_foot(rectified_image, card_polygon, valid_mask=None, debug: bool = F
     foot_mask = np.zeros((h, w), dtype=np.uint8)
     cv2.drawContours(foot_mask, [best_cnt], -1, 255, -1)
 
-    # 6. Cắt eo cổ chân (Ankle Cut-off) tránh đo bắp chân khi chụp đứng
-    y_idx, x_idx = np.where(foot_mask > 0)
-    if len(x_idx) > 200:
-        pts_xy = np.column_stack((x_idx, y_idx)).astype(np.float64)
-        centroid = np.mean(pts_xy, axis=0)
-        pts_centered = pts_xy - centroid
-        cov = np.cov(pts_centered, rowvar=False)
-        eigenvalues, eigenvectors = np.linalg.eigh(cov)
-        sort_idx = np.argsort(eigenvalues)[::-1]
-        v_major = eigenvectors[:, sort_idx[0]]
-        v_minor = eigenvectors[:, sort_idx[1]]
-
-        proj_major = pts_centered @ v_major
-        p_min = float(np.min(proj_major))
-        p_max = float(np.max(proj_major))
-
-        # Phân biệt đầu ngón chân (bè rộng hơn) và gót chân/cổ chân
-        pts_min_end = pts_xy[proj_major <= p_min + 0.15 * (p_max - p_min)]
-        pts_max_end = pts_xy[proj_major >= p_max - 0.15 * (p_max - p_min)]
-        min_touches_top = np.any(pts_min_end[:, 1] <= 15)
-
-        w_min_slice, w_max_slice = [], []
-        for t in np.linspace(p_min + 0.15 * (p_max - p_min), p_min + 0.35 * (p_max - p_min), 8):
-            m = (proj_major >= t - 3) & (proj_major <= t + 3)
-            if np.any(m):
-                q = pts_centered[m] @ v_minor
-                w_min_slice.append(np.ptp(q))
-        for t in np.linspace(p_max - 0.35 * (p_max - p_min), p_max - 0.15 * (p_max - p_min), 8):
-            m = (proj_major >= t - 3) & (proj_major <= t + 3)
-            if np.any(m):
-                q = pts_centered[m] @ v_minor
-                w_max_slice.append(np.ptp(q))
-
-        avg_w_min = np.mean(w_min_slice) if w_min_slice else 0
-        avg_w_max = np.mean(w_max_slice) if w_max_slice else 0
-
-        # Chuẩn hóa sao cho p_max là Ngón chân, p_min là Gót chân
-        if not (min_touches_top or (avg_w_max > avg_w_min)):
-            v_major = -v_major
-            v_minor = -v_minor
-            proj_major = pts_centered @ v_major
-            p_min = float(np.min(proj_major))
-            p_max = float(np.max(proj_major))
-
-        c_edge1 = np.linalg.norm(card_polygon[1] - card_polygon[0])
-        c_edge2 = np.linalg.norm(card_polygon[3] - card_polygon[0])
-        mm_px_local = CARD_LONG_MM / max(1.0, max(c_edge1, c_edge2))
-        span_mm = (p_max - p_min) * mm_px_local
-
-        if min_touches_top or span_mm > 275.0:
-            dist_heel_max_px = 290.0 / mm_px_local
-            dist_heel_min_px = 210.0 / mm_px_local
-            t_search_start = max(p_min, p_max - dist_heel_max_px)
-            t_search_end = min(p_max - 120.0 / mm_px_local, p_max - dist_heel_min_px)
-
-            best_t_cut = p_min
-            min_w_scan = 999999.0
-            scan_step = max(2.0, (t_search_end - t_search_start) / 30.0)
-
-            for t_scan in np.arange(t_search_start, t_search_end, scan_step):
-                m = (proj_major >= t_scan - 4.0) & (proj_major <= t_scan + 4.0)
-                if np.any(m):
-                    q = pts_centered[m] @ v_minor
-                    w_curr = np.ptp(q)
-                    if w_curr < min_w_scan:
-                        min_w_scan = w_curr
-                        best_t_cut = t_scan
-
-            if best_t_cut > p_min:
-                cut_cond = (proj_major < best_t_cut)
-                foot_mask[pts_xy[cut_cond, 1].astype(int), pts_xy[cut_cond, 0].astype(int)] = 0
-                cnts_refined, _ = cv2.findContours(foot_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                if cnts_refined:
-                    best_cnt = max(cnts_refined, key=cv2.contourArea)
-                    foot_mask = np.zeros((h, w), dtype=np.uint8)
-                    cv2.drawContours(foot_mask, [best_cnt], -1, 255, -1)
+    foot_mask, best_cnt = cut_ankle(foot_mask, best_cnt, card_polygon)
 
     # Ảnh bàn chân giữ màu gốc trên nền trắng
     segmented_foot_img = np.full_like(rectified_image, 255)
     segmented_foot_img[foot_mask > 0] = rectified_image[foot_mask > 0]
 
+    return foot_mask, segmented_foot_img, best_cnt
+
+
+def segment_foot_from_polygon(rectified_image, foot_polygon, transform_matrix, card_polygon):
+    """
+    Phương án B — Mặt nạ bàn chân từ YOLO: polygon trên ảnh gốc được nắn bằng cùng ma trận homography
+    với ảnh (rect_res["transform_matrix"]) rồi đi qua bước cắt cổ chân như phương án A.
+    Trả về (foot_mask, segmented_foot_img, contour) giống segment_foot().
+    """
+    if rectified_image is None or foot_polygon is None or card_polygon is None:
+        return None, None, None
+
+    h, w = rectified_image.shape[:2]
+    warped = cv2.perspectiveTransform(
+        np.asarray(foot_polygon, dtype=np.float32).reshape(-1, 1, 2), transform_matrix
+    ).reshape(-1, 2)
+    foot_mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(foot_mask, [np.round(warped).astype(np.int32)], 255)
+
+    # Bỏ các "đuôi" mỏng (bóng, nếp ống quần) bám vào mặt nạ: chúng kéo dài số đo thêm vài cm
+    card_long_px = max(np.linalg.norm(card_polygon[1] - card_polygon[0]), np.linalg.norm(card_polygon[3] - card_polygon[0]))
+    k = max(3, int(round(SPIKE_OPEN_MM * card_long_px / CARD_LONG_MM)) | 1)
+    foot_mask = cv2.morphologyEx(foot_mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+
+    cnts, _ = cv2.findContours(foot_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None, None, None
+    best_cnt = max(cnts, key=cv2.contourArea)
+    foot_mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.drawContours(foot_mask, [best_cnt], -1, 255, -1)
+
+    foot_mask, best_cnt = cut_ankle(foot_mask, best_cnt, card_polygon)
+
+    segmented_foot_img = np.full_like(rectified_image, 255)
+    segmented_foot_img[foot_mask > 0] = rectified_image[foot_mask > 0]
     return foot_mask, segmented_foot_img, best_cnt
 
 
@@ -769,7 +968,96 @@ def rotate_foot_vertical(image, foot_mask, centroid, v_major):
     return rotated_img, rotated_mask, M
 
 
-def measure_foot_pca(rectified_image, foot_mask, foot_contour, mm_per_pixel: float):
+def camera_distance_cm(card_long_px: float, image_shape, focal_ratio: float) -> float:
+    """Khoảng cách máy-mặt thẻ (cm) từ cỡ thẻ trong ảnh gốc; tiêu cự ước tính = focal_ratio x cạnh dài ảnh (px)."""
+    return float(focal_ratio) * max(image_shape[:2]) * CARD_LONG_MM / card_long_px / 10.0
+
+
+def height_correction(card_long_px: float, image_shape, cfg: dict = None):
+    """
+    Hiệu chỉnh độ cao so với mặt thẻ. Thẻ nằm trên sàn nên tỷ lệ mm/px của phép nắn chỉ đúng cho vật nằm trên sàn;
+    mu bàn chân và cổ chân cao hơn nên bị phóng đại D / (D - h), D = khoảng cách máy-mặt thẻ.
+    D suy ra từ cỡ thẻ trong ảnh gốc và tiêu cự ước tính (focal_ratio x cạnh dài ảnh, tính bằng px).
+    Tham số lấy từ khóa measure.height_correction trong configs/yolo_config.yaml.
+    Trả về (hệ số chiều dài, hệ số chiều rộng) hoặc None nếu tắt / thiếu dữ liệu.
+    """
+    if cfg is None:
+        cfg = load_config().get("measure", {}).get("height_correction", {})
+    if not cfg.get("enabled", False) or card_long_px <= 0:
+        return None
+    distance_cm = camera_distance_cm(card_long_px, image_shape, cfg["focal_ratio"])
+    k_len = max(0.0, 1.0 - float(cfg["h_length_cm"]) / distance_cm)
+    k_wid = max(0.0, 1.0 - float(cfg["h_width_cm"]) / distance_cm)
+    return k_len, k_wid
+
+
+def length_features(meas, foot_mask, foot_cnt, mm_per_pixel: float, card_long_px: float, image_shape):
+    """
+    Đặc trưng cho mô hình chiều dài (thứ tự theo LENGTH_FEATURES): số đo mask thô, độ tròn đầu gót, hình học mask (cm, cm²)
+    và cỡ thẻ so với cạnh dài của ảnh (không dùng pixel: ảnh điện thoại 12 MP lớn hơn ảnh huấn luyện 960x1280 nhiều lần). Số đo thô, chưa hiệu chỉnh độ cao, để mô hình tự học phần sai lệch hệ thống.
+    """
+    k = mm_per_pixel
+    focal_ratio = load_config().get("measure", {}).get("height_correction", {}).get("focal_ratio", 0.72)
+    ys, xs = np.where(foot_mask > 0)
+    (_, (rect_a, rect_b), _) = cv2.minAreaRect(np.column_stack((xs, ys)).astype(np.float32))
+    area = cv2.contourArea(foot_cnt) * k * k / 100.0
+    hull = cv2.contourArea(cv2.convexHull(foot_cnt)) * k * k / 100.0
+    distance = camera_distance_cm(card_long_px, image_shape, focal_ratio)
+    length, width = meas["foot_length_raw_mm"] / 10.0, meas["foot_width_raw_mm"] / 10.0
+    return [length, width, meas["rear_ratio"], area, cv2.arcLength(foot_cnt, True) * k / 10.0, hull, area / max(hull, 1e-6),
+            max(rect_a, rect_b) * k / 10.0, min(rect_a, rect_b) * k / 10.0, card_long_px / max(image_shape[:2]), distance, length / distance, width / distance]
+
+
+_LENGTH_MODEL = {}
+
+
+def load_length_model():
+    """Đọc mô hình chiều dài (hồi quy Ridge) do `python -m src.yolo_y8.train --fit-length` lưu; None nếu tắt hoặc chưa có."""
+    cfg = load_config().get("measure", {}).get("length_model", {})
+    if not cfg.get("enabled", False):
+        return None
+    path = get_project_root() / cfg["path"]
+    if str(path) not in _LENGTH_MODEL:
+        _LENGTH_MODEL[str(path)] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    return _LENGTH_MODEL[str(path)]
+
+
+def predict_length_cm(features):
+    """Chiều dài (cm) do mô hình dự đoán từ đặc trưng length_features(); None nếu chưa có mô hình."""
+    model = load_length_model()
+    if model is None:
+        return None
+    x = (np.asarray(features, dtype=np.float64) - model["mean"]) / model["scale"]
+    return float(model["intercept"] + x @ np.asarray(model["coef"]))
+
+
+def refine_foot_axis(pts, origin, u, v, front_frac: float = 0.65, n_iter: int = 3, n_slices: int = 24):
+    """
+    Trục thật của bàn chân: đường thẳng qua trung điểm các lát cắt vuông góc trục của phần phía ngón
+    (front_frac chiều dài), nơi chắc chắn là bàn chân chứ không phải cổ chân. u hướng về phía ngón.
+    Trả về (điểm trên trục, u mới, v mới).
+    """
+    for _ in range(n_iter):
+        a = (pts - origin) @ u
+        q = (pts - origin) @ v
+        a0, a1 = float(a.min()), float(a.max())
+        edges = np.linspace(a1 - front_frac * (a1 - a0), a1, n_slices + 1)
+        xs, ys = [], []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            s = (a >= lo) & (a < hi)
+            if np.count_nonzero(s) > 20:
+                xs.append((lo + hi) / 2.0)
+                ys.append((float(q[s].min()) + float(q[s].max())) / 2.0)
+        if len(xs) < 5:
+            break
+        slope, offset = np.polyfit(xs, ys, 1)
+        d = np.array([1.0, slope]) / np.hypot(1.0, slope)
+        origin = origin + offset * v
+        u, v = d[0] * u + d[1] * v, -d[1] * u + d[0] * v
+    return origin, u, v
+
+
+def measure_foot_pca(rectified_image, foot_mask, foot_contour, mm_per_pixel: float, correction=None):
     """
     Khối 6 — Xác định trục chính (PCA) và Đo đạc kích thước:
     - Lấy toàn bộ tọa độ pixel thuộc bàn chân trên mặt nạ.
@@ -782,6 +1070,7 @@ def measure_foot_pca(rectified_image, foot_mask, foot_contour, mm_per_pixel: flo
       + Chỉ số W/L: Width / Length.
       + Phân loại dáng chân: Ai Cập, La Mã, Hy Lạp.
     - Vẽ trực tiếp kết quả đo lên ảnh.
+    correction = (hệ số dài, hệ số rộng) từ height_correction(), nhân vào số đo mm; số chưa hiệu chỉnh trả về ở *_raw_mm.
     """
     if foot_mask is None or foot_contour is None or mm_per_pixel <= 0:
         return None
@@ -811,49 +1100,90 @@ def measure_foot_pca(rectified_image, foot_mask, foot_contour, mm_per_pixel: flo
     w1 = float(np.ptp((pts_pca[s1] - centroid) @ v_minor)) if np.any(s1) else 0.0
     w2 = float(np.ptp((pts_pca[s2] - centroid) @ v_minor)) if np.any(s2) else 0.0
 
-    # Chuẩn hóa để p_min là GÓT và p_max là NGÓN
-    if w1 > w2:
+    # Chuẩn hóa để p_min là GÓT và p_max là NGÓN: theo kẽ giữa các ngón; không phân biệt được thì theo đầu rộng hơn
+    toe_sign = toe_direction_sign(foot_contour, centroid, v_major, mm_per_pixel)
+    if toe_sign is None:
+        toe_sign = 1 if w2 >= w1 else -1
+    if toe_sign < 0:
         v_major = -v_major
         v_minor = -v_minor
         proj_major = (pts_pca - centroid) @ v_major
         p_min = float(np.min(proj_major))
         p_max = float(np.max(proj_major))
 
+    # Trục PCA bị cổ chân/cẳng chân kéo nghiêng; lấy lại trục theo đường giữa của phần bàn chân nhìn rõ
+    axis_origin, v_major, v_minor = refine_foot_axis(pts_pca, centroid, v_major, v_minor)
+    proj_major = (pts_pca - axis_origin) @ v_major
+    p_min = float(np.min(proj_major))
+    p_max = float(np.max(proj_major))
+
     cnt_pts = foot_contour.reshape(-1, 2).astype(np.float32)
-    cnt_proj = (cnt_pts - centroid) @ v_major
-
-    # Điểm ngón chân xa nhất (Toe tip) và điểm gót chân (Heel bottom)
-    idx_toe = np.argmax(cnt_proj)
-    pt_toe = cnt_pts[idx_toe]
-    idx_heel = np.argmin(cnt_proj)
-    pt_heel = cnt_pts[idx_heel]
-
-    # Chiều dài bàn chân lớn nhất (mm)
-    foot_length_px = float(np.linalg.norm(pt_toe - pt_heel))
-    foot_length_mm = foot_length_px * mm_per_pixel
-
-    # Chiều rộng lớn nhất tại 1/3 phía trước bàn chân (khớp nối ngón/mu bàn chân)
-    u_foot = (pt_toe - pt_heel) / max(1e-5, foot_length_px)
+    u_foot = v_major.astype(np.float32)
     v_foot = np.array([-u_foot[1], u_foot[0]], dtype=np.float32)
 
-    proj_foot = (cnt_pts - pt_heel) @ u_foot
-    ball_mask = (proj_foot >= 0.58 * foot_length_px) & (proj_foot <= 0.85 * foot_length_px)
+    # Cờ "thấy gót" (xem bằng mắt 53 ảnh test: gót thật thì đầu sau mặt nạ tròn lồi; bị ống quần / cẳng chân che thì
+    # mép che làm đầu sau có chỗ lõm sâu hoặc mặt nạ kéo dài ra ngoài):
+    #   độ lồi của 25% đầu sau >= HEEL_REAR_SOLIDITY_MIN và chỗ lõm sâu nhất của viền ở 30% đầu sau <= HEEL_REAR_NOTCH_MAX_MM.
+    slice_w = []
+    for t in range(20):
+        lo = p_min + (p_max - p_min) * t / 20.0
+        in_slice = (proj_major >= lo) & (proj_major < lo + (p_max - p_min) / 20.0)
+        slice_w.append(float(np.ptp((pts_pca[in_slice] - axis_origin) @ v_minor)) if np.any(in_slice) else 0.0)
+    rear_ratio = float(np.mean(slice_w[:2]) / max(1e-5, max(slice_w)))  # độ rộng 10% đầu sau / chỗ rộng nhất (đặc trưng của mô hình chiều dài)
+    rear_pts = pts_pca[proj_major <= p_min + 0.25 * (p_max - p_min)]
+    rear_solidity = float(len(rear_pts) / max(1.0, cv2.contourArea(cv2.convexHull(rear_pts))))
+    rear_notch_mm = 0.0
+    try:
+        defects = cv2.convexityDefects(foot_contour, cv2.convexHull(foot_contour, returnPoints=False))
+    except cv2.error:
+        defects = None
+    if defects is not None:
+        contour_a = (cnt_pts - axis_origin) @ v_major
+        for _, _, far, depth in defects.reshape(-1, 4):
+            if contour_a[far] <= p_min + 0.30 * (p_max - p_min):
+                rear_notch_mm = max(rear_notch_mm, depth / 256.0 * mm_per_pixel)
+    heel_visible = rear_solidity >= HEEL_REAR_SOLIDITY_MIN and rear_notch_mm <= HEEL_REAR_NOTCH_MAX_MM
 
-    if np.any(ball_mask):
-        ball_pts = cnt_pts[ball_mask]
-        q_vals = (ball_pts - pt_heel) @ v_foot
-        q_min_idx = np.argmin(q_vals)
-        q_max_idx = np.argmax(q_vals)
-        pt_w1 = ball_pts[q_min_idx]
-        pt_w2 = ball_pts[q_max_idx]
-        foot_width_px = float(np.linalg.norm(pt_w2 - pt_w1))
+    # Đo bằng DÂY CUNG nằm trong mặt nạ, đầu mút nằm trên viền (không đo giữa hai điểm biên ở hai vị trí khác nhau,
+    # vì như vậy cộng thêm độ lệch ngang giữa chúng, tức là đường chéo):
+    #   chiều dài = dây cung dài nhất song song trục (gót -> ngón)
+    #   chiều rộng = dây cung rộng nhất vuông góc trục, trong cửa sổ cách đầu ngón BALL_FROM_TOE_MM (vùng khớp ngón)
+    strip_px = max(2.0, CHORD_STRIP_MM / mm_per_pixel)
+    q_all = (pts_pca - axis_origin) @ v_foot
+
+    def longest_chord(coord_along, coord_across, lo, hi):
+        """Dây cung dài nhất theo coord_along trong các dải rộng strip_px của coord_across (chỉ xét coord_across trong [lo, hi])."""
+        keep = (coord_across >= lo) & (coord_across <= hi)
+        base = float(coord_across[keep].min())
+        strip = np.floor((coord_across[keep] - base) / strip_px).astype(int)
+        lows = np.full(strip.max() + 1, np.inf)
+        highs = np.full(strip.max() + 1, -np.inf)
+        np.minimum.at(lows, strip, coord_along[keep])
+        np.maximum.at(highs, strip, coord_along[keep])
+        best = int(np.argmax(np.where(np.isfinite(lows), highs - lows, -1.0)))
+        return float(lows[best]), float(highs[best]), base + (best + 0.5) * strip_px
+
+    p_heel, p_toe, q_len = longest_chord(proj_major, q_all, -np.inf, np.inf)
+    pt_heel = (axis_origin + u_foot * p_heel + v_foot * q_len).astype(np.float32)
+    pt_toe = (axis_origin + u_foot * p_toe + v_foot * q_len).astype(np.float32)
+    foot_length_px = p_toe - p_heel
+    foot_length_raw_mm = foot_length_px * mm_per_pixel
+    foot_length_mm = foot_length_raw_mm * (correction[0] if correction else 1.0)
+
+    ball_lo, ball_hi = (p_max - BALL_FROM_TOE_MM[1] / mm_per_pixel, p_max - BALL_FROM_TOE_MM[0] / mm_per_pixel)
+    if np.count_nonzero((proj_major >= ball_lo) & (proj_major <= ball_hi)) > 50:
+        q_lo, q_hi, a_width = longest_chord(q_all, proj_major, ball_lo, ball_hi)
+        foot_width_px = q_hi - q_lo
+        pt_w1 = (axis_origin + u_foot * a_width + v_foot * q_lo).astype(np.float32)
+        pt_w2 = (axis_origin + u_foot * a_width + v_foot * q_hi).astype(np.float32)
     else:
-        q_all = (cnt_pts - pt_heel) @ v_foot
-        foot_width_px = float(np.ptp(q_all))
-        pt_w1 = pt_heel + 0.65 * foot_length_px * u_foot + np.min(q_all) * v_foot
-        pt_w2 = pt_heel + 0.65 * foot_length_px * u_foot + np.max(q_all) * v_foot
+        q_lo, q_hi = float(q_all.min()), float(q_all.max())
+        foot_width_px = q_hi - q_lo
+        pt_w1 = (axis_origin + u_foot * (p_max - 0.35 * (p_max - p_min)) + v_foot * q_lo).astype(np.float32)
+        pt_w2 = (axis_origin + u_foot * (p_max - 0.35 * (p_max - p_min)) + v_foot * q_hi).astype(np.float32)
 
-    foot_width_mm = foot_width_px * mm_per_pixel
+    foot_width_raw_mm = foot_width_px * mm_per_pixel
+    foot_width_mm = foot_width_raw_mm * (correction[1] if correction else 1.0)
     wl_ratio = foot_width_mm / max(1e-5, foot_length_mm)
 
     # Phân loại dáng chân
@@ -868,22 +1198,26 @@ def measure_foot_pca(rectified_image, foot_mask, foot_contour, mm_per_pixel: flo
     cv2.drawContours(vis, [foot_contour], -1, (0, 220, 255), 2, cv2.LINE_AA)
 
     # Vẽ tâm và 2 trục PCA
-    c_int = tuple(np.round(centroid).astype(int))
+    axis_mid = (pt_heel + pt_toe) / 2.0
+    c_int = tuple(np.round(axis_mid).astype(int))
     cv2.circle(vis, c_int, 6, (0, 255, 0), -1, cv2.LINE_AA)
-    p_major1 = tuple(np.round(centroid + v_major * 100).astype(int))
-    p_major2 = tuple(np.round(centroid - v_major * 100).astype(int))
+    p_major1 = tuple(np.round(axis_mid + v_major * 100).astype(int))
+    p_major2 = tuple(np.round(axis_mid - v_major * 100).astype(int))
     cv2.line(vis, p_major1, p_major2, (0, 255, 0), 2, cv2.LINE_AA)
     cv2.putText(vis, "Truc PCA Chinh", (p_major1[0] + 5, p_major1[1]),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
 
-    p_minor1 = tuple(np.round(centroid + v_minor * 60).astype(int))
-    p_minor2 = tuple(np.round(centroid - v_minor * 60).astype(int))
+    p_minor1 = tuple(np.round(axis_mid + v_minor * 60).astype(int))
+    p_minor2 = tuple(np.round(axis_mid - v_minor * 60).astype(int))
     cv2.line(vis, p_minor1, p_minor2, (0, 165, 255), 2, cv2.LINE_AA)
 
     # Đường đo chiều dài: từ gót đến đỉnh ngón xa nhất (màu đỏ)
     p_h = tuple(np.round(pt_heel).astype(int))
     p_t = tuple(np.round(pt_toe).astype(int))
     cv2.line(vis, p_h, p_t, (0, 0, 255), 3, cv2.LINE_AA)
+    for end in (pt_heel, pt_toe):  # vạch vuông góc trục tại hai đầu mút: chỗ mặt nạ chạm tới
+        cv2.line(vis, tuple(np.round(end + v_foot * 60).astype(int)), tuple(np.round(end - v_foot * 60).astype(int)),
+                 (0, 0, 255), 2, cv2.LINE_AA)
     cv2.circle(vis, p_h, 7, (0, 0, 255), -1, cv2.LINE_AA)
     cv2.circle(vis, p_t, 7, (0, 255, 0), -1, cv2.LINE_AA)
     cv2.putText(vis, "Got chan", (p_h[0] + 10, p_h[1] + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 0, 255), 2, cv2.LINE_AA)
@@ -899,16 +1233,22 @@ def measure_foot_pca(rectified_image, foot_mask, foot_contour, mm_per_pixel: flo
 
     # Bảng HUD thông số kích thước và phân loại
     banner_w = min(560, int(vis.shape[1] * 0.95))
-    cv2.rectangle(vis, (12, 12), (12 + banner_w, 150), (20, 20, 20), -1)
-    cv2.rectangle(vis, (12, 12), (12 + banner_w, 150), (0, 220, 255), 2)
+    cv2.rectangle(vis, (12, 12), (12 + banner_w, 172), (20, 20, 20), -1)
+    cv2.rectangle(vis, (12, 12), (12 + banner_w, 172), (0, 220, 255), 2)
     font = cv2.FONT_HERSHEY_SIMPLEX
     cv2.putText(vis, "KET QUA DO KICH THUOC BAN CHAN (OPENCV + PCA)", (22, 34), font, 0.52, (0, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(vis, f"Chieu dai (Got -> Ngon dai nhat): {foot_length_mm:.1f} mm ({foot_length_mm/10.0:.2f} cm)", (22, 60), font, 0.46, (255, 255, 255), 1, cv2.LINE_AA)
     cv2.putText(vis, f"Chieu rong (1/3 phia truoc)     : {foot_width_mm:.1f} mm ({foot_width_mm/10.0:.2f} cm)", (22, 84), font, 0.46, (255, 255, 255), 1, cv2.LINE_AA)
     cv2.putText(vis, f"Ty so Rong / Dai (W/L Ratio)   : {wl_ratio:.3f}", (22, 108), font, 0.45, (180, 255, 100), 1, cv2.LINE_AA)
     cv2.putText(vis, f"Dang ban chan                  : {foot_shape}", (22, 130), font, 0.45, (255, 200, 80), 1, cv2.LINE_AA)
+    if correction:
+        cv2.putText(vis, f"Da hieu chinh do cao: dai x{correction[0]:.3f}, rong x{correction[1]:.3f}", (22, 148), font, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
+    if not heel_visible:
+        cv2.putText(vis, "CANH BAO: khong thay got, so do khong tin cay", (22, 166), font, 0.46, (0, 0, 255), 2, cv2.LINE_AA)
 
     return {
+        "foot_length_raw_mm": round(float(foot_length_raw_mm), 2),
+        "foot_width_raw_mm": round(float(foot_width_raw_mm), 2),
         "foot_length_px": round(float(foot_length_px), 2),
         "foot_width_px": round(float(foot_width_px), 2),
         "foot_length_mm": round(float(foot_length_mm), 2),
@@ -918,6 +1258,10 @@ def measure_foot_pca(rectified_image, foot_mask, foot_contour, mm_per_pixel: flo
         "wl_ratio": round(float(wl_ratio), 3),
         "foot_shape": foot_shape,
         "shape_desc": shape_desc,
+        "heel_visible": heel_visible,
+        "rear_solidity": round(rear_solidity, 3),
+        "rear_notch_mm": round(rear_notch_mm, 1),
+        "rear_ratio": round(rear_ratio, 3),
         "centroid": centroid,
         "v_major": v_major,
         "v_minor": v_minor,
@@ -935,9 +1279,14 @@ def measure_foot_pca(rectified_image, foot_mask, foot_contour, mm_per_pixel: flo
 # KHỐI 7: KẾT QUẢ ĐẦU RA & XỬ LÝ TOÀN TRÌNH 1 ẢNH (PIPELINE)
 # ==============================================================================
 def process_image_pipeline(image_path, output_base_dir=None, split_name: str = "test",
-                           save_images: bool = True, show_window: bool = False):
+                           save_images: bool = True, show_window: bool = False,
+                           method: str = "opencv", detector=None, require_heel: bool = None):
     """
-    Xử lý trọn gói 1 ảnh qua 7 khối pipeline:
+    Xử lý trọn gói 1 ảnh qua 7 khối pipeline.
+    method="opencv": khối 3 và 5 dùng OpenCV thuần (Canny + ngưỡng màu da).
+    method="yolo"  : khối 3 và 5 lấy mask thẻ / chân từ YOLOv8n-seg (detector = predict.load_detector()),
+                     các khối còn lại giữ nguyên.
+    Các khối:
     1. Đọc ảnh
     2. Đánh giá chất lượng ảnh
     3. Phát hiện 4 góc thẻ ID-1
@@ -945,6 +1294,9 @@ def process_image_pipeline(image_path, output_base_dir=None, split_name: str = "
     5. Tách mặt nạ da chân
     6. Đo đạc PCA & Phân loại dáng chân
     7. Vẽ trực quan, in báo cáo terminal chi tiết và xuất file
+    Ảnh được thu nhỏ về tối đa Full HD trước khi xử lý (preprocess_image).
+    require_heel: True thì không thấy gót -> từ chối đo (Trang_thai "Thất bại", không có số cm); None lấy theo
+    measure.require_heel trong configs/yolo_config.yaml.
     """
     img_p = Path(image_path)
     stem = img_p.stem
@@ -952,6 +1304,7 @@ def process_image_pipeline(image_path, output_base_dir=None, split_name: str = "
     record = {
         "Ten_anh": img_p.name,
         "Tap_du_lieu": split_name,
+        "Phuong_phap": method,
         "Trang_thai": "Thất bại",
         "Do_sac_net": 0.0,
         "Do_sang": 0.0,
@@ -961,8 +1314,11 @@ def process_image_pipeline(image_path, output_base_dir=None, split_name: str = "
         "Chieu_rong_mm": "",
         "Chieu_dai_cm": "",
         "Chieu_rong_cm": "",
+        "Chieu_dai_cm_chua_hieu_chinh": "",
+        "Chieu_rong_cm_chua_hieu_chinh": "",
         "Ty_le_W_L": "",
         "Dang_ban_chan": "",
+        "Thay_got": "",
         "Ty_le_Homography_px_mm": "",
         "Ty_le_Don_gian_px_mm": "",
         "Sai_so_goc_chup_pct": "",
@@ -983,10 +1339,18 @@ def process_image_pipeline(image_path, output_base_dir=None, split_name: str = "
         return record
 
     # 2. Khối 2: Kiểm tra chất lượng ảnh
+    if require_heel is None:
+        require_heel = load_config().get("measure", {}).get("require_heel", False)
+    original_size = img.shape[1], img.shape[0]
+    img, resize_scale = preprocess_image(img)
     qa = assess_image_quality(img)
     record["Do_sac_net"] = round(qa["sharpness"], 2)
     record["Do_sang"] = round(qa["brightness"], 2)
     print(f"1. KIỂM TRA CHẤT LƯỢNG ẢNH:")
+    if resize_scale < 1.0:
+        print(f"   - Kích thước ảnh: {original_size[0]}x{original_size[1]} lớn hơn Full HD, đã thu nhỏ về {img.shape[1]}x{img.shape[0]}")
+    else:
+        print(f"   - Kích thước ảnh: {img.shape[1]}x{img.shape[0]}")
     print(f"   - Độ sắc nét (Laplacian var): {qa['sharpness']:.1f} (Yêu cầu >= 80)")
     print(f"   - Độ sáng trung bình       : {qa['brightness']:.1f} (Yêu cầu [50, 215])")
 
@@ -997,7 +1361,11 @@ def process_image_pipeline(image_path, output_base_dir=None, split_name: str = "
     print(f"   => Chất lượng ảnh ĐẠT TIÊU CHUẨN.")
 
     # 3. Khối 3: Phát hiện 4 góc thẻ tham chiếu (ID-1)
-    card_res = detect_card(img, verbose=False)
+    if method == "yolo":
+        yolo_det = detect_foot_card(detector, img)
+        card_res = detect_card_yolo(img, yolo_det)
+    else:
+        card_res = detect_card(img, verbose=False)
     if not card_res["success"]:
         record["error_message"] = card_res["error_message"]
         print(f"2. PHÁT HIỆN THẺ ID-1:")
@@ -1031,7 +1399,11 @@ def process_image_pipeline(image_path, output_base_dir=None, split_name: str = "
     card_polygon = rect_res["card_polygon"]
     valid_mask = rect_res["valid_mask"]
 
-    foot_mask, segmented_foot_img, foot_cnt = segment_foot(rectified_img, card_polygon, valid_mask)
+    if method == "yolo":
+        foot_mask, segmented_foot_img, foot_cnt = segment_foot_from_polygon(
+            rectified_img, yolo_det["foot_polygon"], rect_res["transform_matrix"], card_polygon)
+    else:
+        foot_mask, segmented_foot_img, foot_cnt = segment_foot(rectified_img, card_polygon, valid_mask)
     if foot_mask is None or foot_cnt is None:
         record["error_message"] = "Không thể tách mặt nạ bàn chân khỏi nền sàn"
         print(f"4. TÁCH MẶT NẠ BÀN CHÂN:")
@@ -1039,35 +1411,68 @@ def process_image_pipeline(image_path, output_base_dir=None, split_name: str = "
         return record
 
     record["Tach_chan_thanh_cong"] = "CÓ"
-    print(f"4. TÁCH MẶT NẠ BÀN CHÂN: THÀNH CÔNG (HSV/YCrCb + Inverted Otsu + Morphology)")
+    if method == "yolo":
+        print(f"4. TÁCH MẶT NẠ BÀN CHÂN: THÀNH CÔNG (YOLOv8n-seg, conf = {yolo_det['foot_conf']:.2f})")
+    else:
+        print(f"4. TÁCH MẶT NẠ BÀN CHÂN: THÀNH CÔNG (HSV/YCrCb + Inverted Otsu + Morphology)")
 
     # 6. Khối 6: Xác định trục chính (PCA), Đo đạc & Phân loại dáng chân
-    meas = measure_foot_pca(rectified_img, foot_mask, foot_cnt, rect_res["mm_per_pixel"])
+    correction = height_correction(card_res["card_long_px"], img.shape) if method == "yolo" else None
+    meas = measure_foot_pca(rectified_img, foot_mask, foot_cnt, rect_res["mm_per_pixel"], correction)
     if meas is None:
         record["error_message"] = "Lỗi khi áp dụng PCA đo đạc kích thước bàn chân"
         print(f"5. ĐO ĐẠC BÀN CHÂN BẰNG PCA:")
         print(f"   => [THẤT BẠI]: {record['error_message']}")
         return record
 
+    record["Thay_got"] = "CÓ" if meas["heel_visible"] else "KHÔNG"
+    if method == "yolo":
+        record["length_features"] = length_features(meas, foot_mask, foot_cnt, rect_res["mm_per_pixel"], card_res["card_long_px"], img.shape)
+    if require_heel and not meas["heel_visible"]:
+        record["error_message"] = HEEL_HIDDEN_MESSAGE
+        print(f"5. ĐO ĐẠC BÀN CHÂN:")
+        print(f"   => [TỪ CHỐI ĐO]: {HEEL_HIDDEN_MESSAGE}")
+        return record
+
+    # Chiều dài: mô hình hồi quy học từ số đo thật (chỉ --method yolo, khi đã có mô hình); không thì dùng số đo mask đã hiệu chỉnh.
+    # Ảnh che gót đã bị từ chối ở trên (khi require_heel). Dù cờ thấy gót còn báo nhầm ~17% ảnh bị che, ở các ảnh được nhận mô hình
+    # hồi quy vẫn tốt hơn số đo hình học thuần (valid 0,81 so với 1,91 cm), nên không chuyển cách đo theo cờ.
+    length_mm = meas["foot_length_mm"]
+    length_source = "đo trên mask, đã hiệu chỉnh độ cao" if method == "yolo" else "đo trên mask"
+    if method == "yolo":
+        predicted_cm = predict_length_cm(record["length_features"])
+        if predicted_cm is not None:
+            length_mm = predicted_cm * 10.0
+            length_source = "mô hình hồi quy học từ số đo thật"
+            cv2.rectangle(meas["measurement_image"], (12, 176), (12 + min(560, int(meas["measurement_image"].shape[1] * 0.95)), 200), (20, 20, 20), -1)
+            cv2.putText(meas["measurement_image"], f"Chieu dai du doan (hoi quy): {predicted_cm:.1f} cm", (22, 194),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
+
     record["Trang_thai"] = "Thành công"
-    record["Chieu_dai_mm"] = meas["foot_length_mm"]
+    record["Chieu_dai_mm"] = round(length_mm, 2)
     record["Chieu_rong_mm"] = meas["foot_width_mm"]
-    record["Chieu_dai_cm"] = meas["foot_length_cm"]
+    record["Chieu_dai_cm"] = round(length_mm / 10.0, 2)
     record["Chieu_rong_cm"] = meas["foot_width_cm"]
-    record["Ty_le_W_L"] = meas["wl_ratio"]
+    record["Chieu_dai_cm_chua_hieu_chinh"] = round(meas["foot_length_raw_mm"] / 10.0, 2)
+    record["Chieu_rong_cm_chua_hieu_chinh"] = round(meas["foot_width_raw_mm"] / 10.0, 2)
+    record["Ty_le_W_L"] = round(meas["foot_width_mm"] / max(1e-5, length_mm), 3)
     record["Dang_ban_chan"] = meas["foot_shape"]
     record["vis_image"] = meas["measurement_image"]
 
     print(f"5. KẾT QUẢ ĐO ĐẠC BÀN CHÂN (PCA):")
-    print(f"   - Chiều dài lớn nhất (Gót -> Ngón): {meas['foot_length_mm']:.1f} mm ({meas['foot_length_cm']:.2f} cm | {meas['foot_length_px']:.1f} px)")
+    print(f"   - Chiều dài lớn nhất (Gót -> Ngón): {length_mm:.1f} mm ({length_mm / 10:.2f} cm | {meas['foot_length_px']:.1f} px) [{length_source}]")
     print(f"   - Chiều rộng lớn nhất (1/3 trước) : {meas['foot_width_mm']:.1f} mm ({meas['foot_width_cm']:.2f} cm | {meas['foot_width_px']:.1f} px)")
-    print(f"   - Chỉ số tỷ lệ bề ngang (W/L)     : {meas['wl_ratio']:.3f}")
+    if correction:
+        print(f"   - Đã hiệu chỉnh độ cao (mu bàn chân cao hơn mặt thẻ): dài x{correction[0]:.3f}, rộng x{correction[1]:.3f}"
+              f" (chưa hiệu chỉnh: {meas['foot_length_raw_mm'] / 10:.2f} x {meas['foot_width_raw_mm'] / 10:.2f} cm)")
+    print(f"   - Thấy gót                        : " + ("CÓ" if meas["heel_visible"] else "KHÔNG (gót bị che, số đo kém tin cậy: sai số có thể trên 1 cm, nên chụp lại)"))
+    print(f"   - Chỉ số tỷ lệ bề ngang (W/L)     : {record['Ty_le_W_L']:.3f}")
     print(f"   - Phân loại dáng chân             : {meas['foot_shape']} ({meas['shape_desc']})")
     print("=" * 78)
 
     # 7. Xuất file kết quả nếu có thư mục output
     if save_images and output_base_dir:
-        out_dir = Path(output_base_dir) / split_name
+        out_dir = Path(output_base_dir) / (split_name if method == "opencv" else f"{split_name}_{method}")
         out_dir.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(out_dir / f"{stem}_ket_qua_do.jpg"), meas["measurement_image"])
         cv2.imwrite(str(out_dir / f"{stem}_xoay_dung.jpg"), meas["rotated_image"])
@@ -1080,7 +1485,8 @@ def process_image_pipeline(image_path, output_base_dir=None, split_name: str = "
 # VÒNG LẶP DUYỆT TẬP DỮ LIỆU VỚI PHÍM TẮT CHUYỂN TIẾP / DỪNG
 # ==============================================================================
 def run_dataset_loop(split: str = "test", dataset_dir: Path = None, output_dir: Path = None,
-                     show_window: bool = True, save_images: bool = True):
+                     show_window: bool = True, save_images: bool = True,
+                     method: str = "opencv", detector=None):
     """
     Duyệt toàn bộ tập dữ liệu, hiển thị kết quả đo:
     - Bấm bất kỳ phím nào để xem ảnh tiếp theo.
@@ -1091,7 +1497,7 @@ def run_dataset_loop(split: str = "test", dataset_dir: Path = None, output_dir: 
     n_imgs = len(image_paths)
 
     print("\n" + "#" * 80)
-    print("CHƯƠNG TRÌNH ĐO BÀN CHÂN VỚI THẺ THAM CHIẾU ID-1 (OPENCV)")
+    print(f"CHƯƠNG TRÌNH ĐO BÀN CHÂN VỚI THẺ THAM CHIẾU ID-1 (phương pháp: {method.upper()})")
     print(f"- Tập dữ liệu đang chạy: {split.upper()} ({n_imgs} ảnh)")
     print(f"- Phím tắt tương tác   : Nhấn 'q' để dừng, phím bất kỳ để tiếp tục ảnh kế")
     print("#" * 80)
@@ -1115,7 +1521,8 @@ def run_dataset_loop(split: str = "test", dataset_dir: Path = None, output_dir: 
     for idx, p in enumerate(image_paths, 1):
         print(f"\n>>> Đang xử lý [{idx}/{n_imgs}]: {os.path.basename(p)}")
         rec = process_image_pipeline(p, output_base_dir=output_dir, split_name=split,
-                                     save_images=save_images, show_window=show_window)
+                                     save_images=save_images, show_window=show_window,
+                                     method=method, detector=detector)
         all_records.append(rec)
         if rec["Trang_thai"] == "Thành công":
             success_count += 1
@@ -1127,6 +1534,7 @@ def run_dataset_loop(split: str = "test", dataset_dir: Path = None, output_dir: 
             if key == ord('q') or key == ord('Q'):
                 print("\n[NGƯỜI DÙNG DỪNG]: Đã nhận phím 'q'. Dừng vòng lặp duyệt ảnh.")
                 break
+        rec.pop("vis_image", None)  # ảnh vẽ kết quả rất nặng: bỏ ngay để RAM không tăng theo số ảnh (chỉ CSV cần record)
 
     if show_window:
         try:
@@ -1149,12 +1557,14 @@ def run_dataset_loop(split: str = "test", dataset_dir: Path = None, output_dir: 
     if output_dir:
         out_p = Path(output_dir)
         out_p.mkdir(parents=True, exist_ok=True)
-        csv_file = out_p / f"bang_ket_qua_do_{split}.csv"
+        csv_file = out_p / (f"bang_ket_qua_do_{split}.csv" if method == "opencv"
+                            else f"bang_ket_qua_do_{split}_{method}.csv")
         fieldnames = [
-            "Ten_anh", "Tap_du_lieu", "Trang_thai", "Do_sac_net", "Do_sang",
+            "Ten_anh", "Tap_du_lieu", "Phuong_phap", "Trang_thai", "Do_sac_net", "Do_sang",
             "The_ID_tim_thay", "Tach_chan_thanh_cong",
             "Chieu_dai_mm", "Chieu_rong_mm", "Chieu_dai_cm", "Chieu_rong_cm",
-            "Ty_le_W_L", "Dang_ban_chan", "Ty_le_Homography_px_mm",
+            "Chieu_dai_cm_chua_hieu_chinh", "Chieu_rong_cm_chua_hieu_chinh",
+            "Ty_le_W_L", "Dang_ban_chan", "Thay_got", "Ty_le_Homography_px_mm",
             "Ty_le_Don_gian_px_mm", "Sai_so_goc_chup_pct", "error_message"
         ]
         with open(csv_file, mode="w", newline="", encoding="utf-8-sig") as f:
@@ -1190,22 +1600,40 @@ def main():
     parser.add_argument("--output", "-o", type=str, default=None, help="Thư mục xuất kết quả (mặc định outputs/)")
     parser.add_argument("--no-gui", action="store_true", default=False, help="Chạy không mở cửa sổ cv2.imshow (batch mode)")
     parser.add_argument("--debug", action="store_true", default=False, help="Bật chế độ debug")
+    parser.add_argument("--json", action="store_true", default=False,
+                        help="Ảnh đơn: in đúng 1 dòng JSON {ok, length_cm, width_cm, error} ra stdout (báo cáo chi tiết chuyển sang stderr)")
+    parser.add_argument("--method", "-m", type=str, choices=["opencv", "yolo"], default="opencv",
+                        help="Cách lấy mask thẻ/chân: 'opencv' (mặc định) hoặc 'yolo' (cần weights đã train)")
+    parser.add_argument("--weights", type=str, default=None,
+                        help="Weights YOLO cho --method yolo (mặc định: khóa infer.weights trong configs/yolo_config.yaml)")
 
     args = parser.parse_args()
     project_root = get_project_root()
     target_img = args.image or args.image_pos
 
     out_dir = Path(args.output).resolve() if args.output else (project_root / "outputs")
+    detector = load_detector(args.weights) if args.method == "yolo" else None
 
     # Trường hợp 1: Chạy ảnh đơn lẻ
     if target_img:
         img_p = Path(target_img).resolve()
         if not img_p.exists():
-            print(f"[LỖI] Không tìm thấy file ảnh: {target_img}")
+            if args.json:
+                print(json.dumps({"ok": False, "length_cm": None, "width_cm": None,
+                                  "error": f"Không tìm thấy file ảnh: {target_img}"}, ensure_ascii=False))
+            else:
+                print(f"[LỖI] Không tìm thấy file ảnh: {target_img}")
             return
-        rec = process_image_pipeline(img_p, output_base_dir=out_dir, split_name="single",
-                                     save_images=True, show_window=not args.no_gui)
-        if not args.no_gui and rec.get("vis_image") is not None:
+        with redirect_stdout(sys.stderr if args.json else sys.stdout):
+            rec = process_image_pipeline(img_p, output_base_dir=out_dir, split_name="single",
+                                         save_images=True, show_window=not args.no_gui and not args.json,
+                                         method=args.method, detector=detector)
+        if args.json:
+            ok = rec["Trang_thai"] == "Thành công"
+            print(json.dumps({"ok": ok, "length_cm": rec["Chieu_dai_cm"] if ok else None,
+                              "width_cm": rec["Chieu_rong_cm"] if ok else None,
+                              "error": rec["error_message"]}, ensure_ascii=False))
+        elif not args.no_gui and rec.get("vis_image") is not None:
             cv2.imshow("Ket qua do anh don le", rec["vis_image"])
             cv2.waitKey(0)
             cv2.destroyAllWindows()
@@ -1215,7 +1643,8 @@ def main():
         splits_to_run = ["train", "valid", "test"] if args.split == "all" else [args.split]
         for sp in splits_to_run:
             run_dataset_loop(split=sp, dataset_dir=data_dir, output_dir=out_dir,
-                             show_window=not args.no_gui, save_images=True)
+                             show_window=not args.no_gui, save_images=True,
+                             method=args.method, detector=detector)
 
 
 if __name__ == "__main__":

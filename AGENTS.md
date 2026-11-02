@@ -12,7 +12,8 @@ src/doan.py             Pipeline chính (bản DUY NHẤT, sửa trực tiếp �
 src/opencv/             Module OpenCV: card_detector, perspective, foot_segmenter, foot_measurer, pipeline
 src/yolo_y8/            train.py, predict.py, evaluate.py
 configs/                opencv_config.yaml, yolo_config.yaml
-data/yolo_dataset/      Bộ train sạch (images/, labels/, data.yaml, CSV). Chỉ thư mục này được commit
+data/                   Toàn bộ dữ liệu (yolo_dataset/ là bộ train sạch; raw_images/, roboflow_export/) được commit
+models/trained/         Chỉ mô hình dùng để chạy: yolov8n_seg_foot/weights/best.pt và length_model.json (nhỏ, được commit)
 docs/                   Đề cương, tài liệu báo cáo
 scripts/                Script tiện ích lâu dài (không phải script thử nghiệm)
 requirements.txt
@@ -32,9 +33,10 @@ Muốn thêm thư mục cấp gốc mới thì phải hỏi người dùng trư�
 
 ## 3. Dữ liệu, model, đường dẫn
 
-- `data/yolo_dataset/` (bộ train sạch, ~70MB) **được commit** để chuyển sang máy train. Mọi thứ khác trong `data/` (`raw_images/`, `roboflow_export/`, bản backup…) **không đưa lên git**, chia sẻ qua Drive/Roboflow. Không commit `labels/*.cache`.
+- `data/` (`yolo_dataset/` ~96MB, `raw_images/`, `roboflow_export/`) **được commit** để máy khác pull về là dùng được ngay, không phải chép thêm gì. Không commit `labels/*.cache` (đã gitignore).
 - Không tự thay đổi `data/yolo_dataset/` (thêm/xóa/đổi tên ảnh) nếu người dùng không yêu cầu, vì mỗi lần commit lại ảnh sẽ làm `.git` phình thêm.
-- Weights (`*.pt`, `*.pth`, `*.onnx`), `runs/`, `models/trained/` **không commit**. Những thứ này tải lại hoặc train lại được.
+- **Chỉ commit mô hình dùng để chạy**: `models/trained/yolov8n_seg_foot/weights/best.pt` và `models/trained/length_model.json` (máy không có GPU không train được nên phải lấy qua git). Cập nhật chúng khi train lại; mỗi lần commit lại `best.pt` làm `.git` phình thêm ~7MB nên chỉ commit khi mô hình thật sự đổi.
+- **Không commit** checkpoint trung gian (`epoch*.pt`, `last.pt`), các lần train cũ, `runs/`, `*.pth`, `*.onnx`, `models/trained/dataset_resolved.yaml` (đã gitignore).
 - **Chỉ dùng đường dẫn tương đối** tính từ gốc dự án (`get_project_root()` / `Path(__file__)`). Không ghi cứng `C:/Users/...` vào code hay file yaml rồi commit.
 - Tham số (ngưỡng, kích thước thẻ…) đặt trong `configs/*.yaml`, không ghi cứng rải rác trong code.
 
@@ -58,18 +60,18 @@ git diff --stat
 
 - Chỉ `git add <file cụ thể>`. **Không `git add .` hoặc `git add -A`** khi chưa đọc `git status`.
 - **Không bao giờ dùng `git add -f` / `--force`**. File bị ignore là có lý do.
-- Nếu `git status` hiện ảnh, `.pyc`, `__pycache__`, `outputs/`, `data/` (ngoài `data/yolo_dataset/`), `.pt` hay thư mục AI thì **dừng lại, không commit**, và báo người dùng.
+- Nếu `git status` hiện `.pyc`, `__pycache__`, `outputs/`, `weights/` ở thư mục gốc, `epoch*.pt`/`last.pt`, `.venv` hay thư mục AI thì **dừng lại, không commit**, và báo người dùng. Ảnh trong `data/` và hai file mô hình ở trên là hợp lệ.
 - Mỗi commit chỉ làm một việc, kèm message mô tả rõ, ví dụ `Sửa phát hiện thẻ khi ảnh bị lóa`. Không dùng message kiểu `k`, `update`, `fix`.
 - **Không `git push --force`, không viết lại lịch sử, không xóa nhánh** nếu người dùng không yêu cầu rõ ràng.
 - Khi pull bị conflict thì giải quyết conflict. Không xóa file của người khác để cho qua.
-- Mỗi commit phải nhỏ (vài trăm KB). Nếu diff có file > 1MB thì kiểm tra lại. Ngoại lệ: commit đưa `data/yolo_dataset/` lên, và commit đó chỉ chứa thư mục này.
+- Mỗi commit phải nhỏ (vài trăm KB). Nếu diff có file > 1MB thì kiểm tra lại. Ngoại lệ: commit đưa dữ liệu (`data/`) hoặc mô hình (`models/trained/`) lên; mỗi loại nằm trong commit riêng, không lẫn với code.
 
 ## 6. Chạy chương trình
 
 ```
 pip install -r requirements.txt
 
-python main.py --image <đường_dẫn_ảnh>          # 1 ảnh
+python main.py --image <đường_dẫn_ảnh> --method yolo --no-gui [--json]   # 1 ảnh (--json: 1 dòng JSON cho máy chủ)
 python main.py --split test --no-gui            # chạy cả tập test (data/yolo_dataset/images/test)
 python -m src.yolo_y8.train --data configs/yolo_config.yaml
 python -m src.yolo_y8.predict --weights models/trained/.../best.pt --source <ảnh|thư mục>

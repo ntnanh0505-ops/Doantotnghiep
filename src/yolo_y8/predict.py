@@ -8,8 +8,74 @@ Sử dụng:
 """
 
 import argparse
+from pathlib import Path
 
-from .train import get_project_root, resolve_device
+import numpy as np
+
+from .train import get_project_root, load_config, resolve_device
+
+FOOT_CLASS, CARD_CLASS = 0, 1
+
+
+def load_detector(weights: str = None, device: str = None) -> dict:
+    """
+    Nạp model cho pipeline đo. Weights và ngưỡng lấy từ khóa `infer` trong configs/yolo_config.yaml.
+
+    Trả về dict gồm model và tham số inference để truyền cho detect_foot_card().
+    """
+    try:
+        from ultralytics import YOLO
+    except ImportError:
+        raise ImportError("Ultralytics chưa được cài đặt. Chạy: pip install -r requirements.txt")
+
+    infer = load_config().get("infer", {})
+    path = Path(weights or infer.get("weights", "models/trained/yolov8n_seg_foot/weights/best.pt"))
+    if not path.is_absolute():
+        path = get_project_root() / path
+    if not path.exists():
+        raise FileNotFoundError(f"Không tìm thấy weights: {path} (train bằng python -m src.yolo_y8.train)")
+
+    return {
+        "model": YOLO(str(path)),
+        "conf": infer.get("conf", 0.25),
+        "iou": infer.get("iou", 0.45),
+        "imgsz": infer.get("imgsz", 640),
+        "retina_masks": infer.get("retina_masks", True),
+        "device": resolve_device(device),
+    }
+
+
+def detect_foot_card(detector: dict, image: np.ndarray) -> dict:
+    """
+    Phân đoạn bàn chân và thẻ trên 1 ảnh BGR. Mỗi lớp chỉ giữ đối tượng có conf cao nhất
+    (đánh giá test: ~12% ảnh có thêm 1 đối tượng thừa nhỏ hơn nhiều, luôn có conf thấp hơn).
+
+    Trả về {"foot_polygon", "card_polygon"} (ndarray Nx2 theo pixel ảnh gốc, hoặc None nếu không thấy),
+    cùng "foot_conf", "card_conf", "n_foot", "n_card".
+    """
+    r = detector["model"].predict(
+        image,
+        conf=detector["conf"],
+        iou=detector["iou"],
+        imgsz=detector["imgsz"],
+        retina_masks=detector["retina_masks"],
+        device=detector["device"],
+        verbose=False,
+    )[0]
+
+    out = {}
+    cls = r.boxes.cls.cpu().numpy().astype(int) if r.masks is not None else np.array([], dtype=int)
+    conf = r.boxes.conf.cpu().numpy() if r.masks is not None else np.array([])
+    for name, c in (("foot", FOOT_CLASS), ("card", CARD_CLASS)):
+        idx = np.flatnonzero(cls == c)
+        out[f"n_{name}"] = int(len(idx))
+        if len(idx) == 0:
+            out[f"{name}_polygon"], out[f"{name}_conf"] = None, 0.0
+            continue
+        best = idx[np.argmax(conf[idx])]
+        out[f"{name}_polygon"] = r.masks.xy[best].astype(np.float32)
+        out[f"{name}_conf"] = float(conf[best])
+    return out
 
 
 def predict(

@@ -21,6 +21,44 @@ names:
 # ── Model ────────────────────────────────────────────────────────────────────
 model: models/yolov8n-seg.pt
 
+# ── Inference (pipeline đo: python main.py --method yolo) ───────────────────
+infer:
+  weights: models/trained/yolov8n_seg_foot/weights/best.pt
+  conf: 0.25            # Mỗi lớp chỉ giữ 1 đối tượng có conf cao nhất nên ngưỡng này không cần cao
+  iou: 0.45
+  imgsz: 640
+  retina_masks: true    # Mask độ phân giải ảnh gốc: cạnh thẻ/chân chính xác hơn khi đo mm
+
+# ── Ảnh đầu vào ──────────────────────────────────────────────────────────────
+# Ảnh lớn hơn khung này (mặc định Full HD, tối đa ~2 MP; máy nào cũng chụp được) bị thu nhỏ trước khi xử lý (giữ tỉ lệ, không
+# phóng to). Ảnh huấn luyện (960x1280) nằm trong khung này nên số đo không đổi; ảnh 12 MP của điện thoại được thu nhỏ về ~1080x1440.
+input:
+  max_long_side: 1920
+  max_short_side: 1080
+
+# ── Hiệu chỉnh độ cao (chỉ áp dụng cho --method yolo) ───────────────────────
+# Thẻ nằm trên sàn, mu bàn chân/cổ chân cao hơn nên bị phóng đại D / (D - h), D = khoảng cách máy-mặt thẻ.
+# D = (focal_ratio x cạnh dài ảnh) x 85,6 mm / cạnh dài thẻ trong ảnh (px).
+# h_length_cm, h_width_cm là chiều cao hiệu dụng tìm được trên train+valid (người test không tham gia),
+# nên gắn với focal_ratio: đổi focal_ratio (hoặc loại điện thoại khác) thì phải fit lại cả ba.
+measure:
+  # true: từ chối đo (không trả số cm) khi không thấy gót; ảnh trả về error_message để người dùng chụp lại.
+  # false: vẫn đo (chỉ dùng khi nghiên cứu, ví dụ evaluate --include-hidden).
+  require_heel: true
+  height_correction:
+    enabled: true
+    focal_ratio: 0.72     # Tiêu cự px / cạnh dài ảnh (điện thoại ~26 mm tương đương)
+    h_length_cm: 2.95
+    h_width_cm: 3.9
+
+# ── Mô hình chiều dài (chỉ áp dụng cho --method yolo) ───────────────────────
+# Hồi quy Ridge học từ số đo thật (data/yolo_dataset/subjects_clean.csv) trên ảnh train+valid. Đầu vào là các đặc trưng mask
+# và cỡ thẻ (doan.LENGTH_FEATURES). Huấn luyện: python -m src.yolo_y8.train --fit-length. Chưa có file thì dùng số đo mask
+# đã hiệu chỉnh độ cao. File nằm trong models/trained/ nên không commit.
+  length_model:
+    enabled: true
+    path: models/trained/length_model.json
+
 # ── Hyperparameters ──────────────────────────────────────────────────────────
 train_args:
   epochs: 100
